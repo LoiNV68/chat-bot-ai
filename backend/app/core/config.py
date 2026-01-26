@@ -3,13 +3,13 @@ from pydantic_settings import BaseSettings
 from typing import List, Union
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "Unimind Core 2.0"
+    PROJECT_NAME: str = "AI-CHATBOT"
     API_V1_STR: str = "/api/v1"
     BACKEND_CORS_ORIGINS: List[str] = ["*"]
 
     POSTGRES_SERVER: str = os.getenv("POSTGRES_SERVER", "localhost")
     POSTGRES_USER: str = os.getenv("POSTGRES_USER", "postgres")
-    POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD", "password")
+    POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD", "123!@#")
     POSTGRES_DB: str = os.getenv("POSTGRES_DB", "unimind")
     SQLALCHEMY_DATABASE_URI: Union[str, None] = None
 
@@ -25,9 +25,12 @@ class Settings(BaseSettings):
     def __init__(self, **values):
         super().__init__(**values)
         if not self.SQLALCHEMY_DATABASE_URI:
-            self.SQLALCHEMY_DATABASE_URI = f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_SERVER}/{self.POSTGRES_DB}"
+            from urllib.parse import quote_plus
+            encoded_password = quote_plus(self.POSTGRES_PASSWORD)
+            self.SQLALCHEMY_DATABASE_URI = f"postgresql+asyncpg://{self.POSTGRES_USER}:{encoded_password}@{self.POSTGRES_SERVER}/{self.POSTGRES_DB}"
 
     class Config:
         case_sensitive = True
+        env_file = ".env"
 
 settings = Settings()

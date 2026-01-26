@@ -5,8 +5,8 @@ services:
     image: postgres:16-alpine
     container_name: unimind-db
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: '123!@#'
       POSTGRES_DB: unimind
     ports:
       - "5432:5432"

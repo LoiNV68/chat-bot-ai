@@ -7,6 +7,9 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json"
 )
 
+print(f"DEBUG: POSTGRES_SERVER={settings.POSTGRES_SERVER}")
+print(f"DEBUG: SQLALCHEMY_DATABASE_URI={settings.SQLALCHEMY_DATABASE_URI}")
+
 # Set all CORS enabled origins
 if settings.BACKEND_CORS_ORIGINS:
     app.add_middleware(
@@ -21,5 +24,5 @@ if settings.BACKEND_CORS_ORIGINS:
 def root():
     return {"message": "Welcome to Unimind Core 2.0 API"}
 
-from app.api.api_v1.api import api_router
+from app.api.api import api_router
 app.include_router(api_router, prefix=settings.API_V1_STR)
