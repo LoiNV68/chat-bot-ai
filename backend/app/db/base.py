@@ -4,3 +4,4 @@ from app.db.base_class import Base  # noqa
 from app.models.user import User  # noqa
 from app.models.document import Document  # noqa
 from app.models.chat import ChatHistory, FeedbackLoop  # noqa
+from app.models.audit_log import AuditLog # noqa

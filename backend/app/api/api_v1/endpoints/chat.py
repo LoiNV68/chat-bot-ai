@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Optional
@@ -9,6 +9,7 @@ from app.api import deps
 from app.models.chat import ChatHistory
 from app.services.vector_store import VectorStore
 from app.core.config import settings
+from app.core.limiter import limiter
 
 router = APIRouter()
 vector_store = VectorStore()
@@ -23,8 +24,10 @@ class ChatResponse(BaseModel):
     sources: List[str]
 
 @router.post("/", response_model=ChatResponse)
+@limiter.limit("5/minute")
 def chat(
-    request: ChatRequest,
+    request: Request,
+    chat_request: ChatRequest,
     db: Session = Depends(deps.get_db)
 ):
     # 1. Retrieve Context
@@ -37,7 +40,7 @@ def chat(
         base_url=settings.OLLAMA_BASE_URL,
         model="nomic-embed-text"
     )
-    query_vector = embeddings_model.embed_query(request.query)
+    query_vector = embeddings_model.embed_query(chat_request.query)
     
     search_results = vector_store.search(query_vector=query_vector, limit=3)
     
@@ -53,12 +56,12 @@ def chat(
     """)
     
     chain = prompt | llm
-    answer = chain.invoke({"context": context, "question": request.query})
+    answer = chain.invoke({"context": context, "question": chat_request.query})
     
     # 3. Save History
     # (Simplified: logic to save to DB)
     db_history = ChatHistory(
-        user_query=request.query,
+        user_query=chat_request.query,
         ai_response=answer
     )
     db.add(db_history)

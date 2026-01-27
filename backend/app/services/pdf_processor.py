@@ -1,26 +1,70 @@
-import pypdf
-from typing import List
+import pdfplumber
+from typing import List, Dict, Any
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 class PDFProcessor:
-    @staticmethod
-    def extract_text(file_path: str) -> str:
-        text = ""
-        with open(file_path, 'rb') as f:
-            reader = pypdf.PdfReader(f)
-            for page in reader.pages:
-                text += page.extract_text() + "\n"
-        return text
-
-    @staticmethod
-    def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> List[str]:
-        # Simple word-based chunking
-        words = text.split()
-        chunks = []
-        for i in range(0, len(words), chunk_size - overlap):
-            chunk = " ".join(words[i:i + chunk_size])
-            chunks.append(chunk)
-        return chunks
+    def __init__(self):
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            separators=["\n\n", "\n", " ", ""]
+        )
 
     def process(self, file_path: str) -> List[str]:
-        text = self.extract_text(file_path)
-        return self.chunk_text(text)
+        """
+        Process PDF file to extract text and tables with smart chunking.
+        Returns a list of string chunks.
+        """
+        chunks = []
+        
+        try:
+            with pdfplumber.open(file_path) as pdf:
+                for page in pdf.pages:
+                    # 1. Extract and format tables
+                    tables = page.extract_tables()
+                    for table in tables:
+                        # Convert table to Markdown format for better LLM understanding
+                        if table:
+                            table_md = self._table_to_markdown(table)
+                            chunks.append(f"Table from page {page.page_number}:\n{table_md}")
+
+                    # 2. Extract text (ignoring tables would be ideal but complex, 
+                    # for now we extract text and chunk it)
+                    text = page.extract_text()
+                    if text:
+                        # Split text into chunks
+                        page_text_chunks = self.text_splitter.split_text(text)
+                        chunks.extend(page_text_chunks)
+                        
+        except Exception as e:
+            print(f"Error processing PDF {file_path}: {str(e)}")
+            # Fallback or re-raise depending on requirements
+            raise e
+
+        return chunks
+
+    def _table_to_markdown(self, table: List[List[str]]) -> str:
+        """Helper to convert list of lists to Markdown table string"""
+        if not table:
+            return ""
+        
+        # Clean None values
+        table = [[str(cell) if cell is not None else "" for cell in row] for row in table]
+        
+        # Determine number of columns
+        if not table:
+            return ""
+        
+        headers = table[0]
+        # Create separator
+        separator = ["---"] * len(headers)
+        
+        # Build Markdown table
+        md_lines = []
+        md_lines.append("| " + " | ".join(headers) + " |")
+        md_lines.append("| " + " | ".join(separator) + " |")
+        
+        for row in table[1:]:
+             md_lines.append("| " + " | ".join(row) + " |")
+             
+        return "\n".join(md_lines)

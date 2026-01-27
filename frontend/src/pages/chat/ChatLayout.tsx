@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Send, Bot, User, Plus, MessageSquare, Settings, Menu, LogOut, Shield } from 'lucide-react';
+import { Send, Bot, User, Plus, MessageSquare, Settings, Menu, LogOut, Shield, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
@@ -19,14 +19,23 @@ const ChatLayout = () => {
     ]);
     const [inputValue, setInputValue] = useState('');
     const [isTyping, setIsTyping] = useState(false);
+    const [lastMessageTime, setLastMessageTime] = useState(0);
+    const COOLDOWN_MS = 2000; // 2 seconds cooldown
 
     const handleSendMessage = async () => {
         if (!inputValue.trim()) return;
+
+        const now = Date.now();
+        if (now - lastMessageTime < COOLDOWN_MS) {
+            setMessages(prev => [...prev, { role: 'ai', content: '⏳ Bạn đang thao tác quá nhanh. Vui lòng đợi 2 giây.' }]);
+            return;
+        }
         
         const newMessages = [...messages, { role: 'user', content: inputValue }];
         setMessages(newMessages);
         setInputValue('');
         setIsTyping(true);
+        setLastMessageTime(now);
 
         try {
             const token = localStorage.getItem('token');
@@ -43,9 +52,15 @@ const ChatLayout = () => {
 
             setMessages(prev => [...prev, { role: 'ai', content: response.data.answer }]);
 
-        } catch (error) {
+        } catch (error: any) {
             console.error('Chat error:', error);
-            setMessages(prev => [...prev, { role: 'ai', content: 'Xin lỗi, hệ thống đang gặp sự cố.' }]);
+            
+            if (error.response && error.response.status === 429) {
+                // Rate limit error
+                setMessages(prev => [...prev, { role: 'ai', content: '🚫 Bạn đang gửi quá nhanh. Vui lòng đợi một chút (tối đa 5 câu/phút).' }]);
+            } else {
+                setMessages(prev => [...prev, { role: 'ai', content: 'Xin lỗi, hệ thống đang gặp sự cố.' }]);
+            }
         } finally {
             setIsTyping(false);
         }
@@ -202,16 +217,22 @@ const ChatLayout = () => {
                             <Input
                                 value={inputValue}
                                 onChange={(e) => setInputValue(e.target.value)}
-                                onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                                className="min-h-[44px] w-full resize-none border-0 bg-transparent px-3 py-2.5 text-slate-100 placeholder:text-slate-500 focus-visible:ring-0 focus-visible:ring-offset-0"
-                                placeholder="Nhập lệnh hoặc câu hỏi của bạn..."
+                                onKeyDown={(e) => e.key === 'Enter' && !isTyping && handleSendMessage()}
+                                className="min-h-[44px] w-full resize-none border-0 bg-transparent px-3 py-2.5 text-slate-100 placeholder:text-slate-500 focus-visible:ring-0 focus-visible:ring-offset-0 disabled:opacity-50"
+                                placeholder={isTyping ? "AI đang trả lời..." : "Nhập lệnh hoặc câu hỏi của bạn..."}
+                                disabled={isTyping}
                             />
                             <Button 
                                 onClick={handleSendMessage}
                                 size="icon"
-                                className="h-10 w-10 shrink-0 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg transition-all shadow-[0_0_10px_-2px_rgba(6,182,212,0.5)] hover:shadow-[0_0_15px_-2px_rgba(6,182,212,0.7)]"
+                                disabled={isTyping || !inputValue.trim()}
+                                className="h-10 w-10 shrink-0 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg transition-all shadow-[0_0_10px_-2px_rgba(6,182,212,0.5)] hover:shadow-[0_0_15px_-2px_rgba(6,182,212,0.7)] disabled:opacity-50 disabled:cursor-not-allowed"
                             >
-                                <Send className="h-5 w-5" />
+                                {isTyping ? (
+                                    <Loader2 className="h-5 w-5 animate-spin" />
+                                ) : (
+                                    <Send className="h-5 w-5" />
+                                )}
                             </Button>
                         </div>
                         <div className="mt-2 text-center text-xs text-slate-600">

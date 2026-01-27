@@ -36,6 +36,6 @@ class LLMClient:
         
         History: {history}
         Query: {query}
-        Refined Query:
+        Câu hỏi:
         """
         return self.generation_model.invoke(prompt)

@@ -7,6 +7,13 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json"
 )
 
+from slowapi.errors import RateLimitExceeded
+from slowapi import _rate_limit_exceeded_handler
+from app.core.limiter import limiter
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 print(f"DEBUG: POSTGRES_SERVER={settings.POSTGRES_SERVER}")
 print(f"DEBUG: SQLALCHEMY_DATABASE_URI={settings.SQLALCHEMY_DATABASE_URI}")
 

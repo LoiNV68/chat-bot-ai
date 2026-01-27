@@ -11,6 +11,8 @@ from app.models.document import Document
 from app.services.pdf_processor import PDFProcessor
 from app.services.excel_processor import ExcelProcessor
 from app.services.vector_store import VectorStore
+from app.services.audit_service import AuditService
+from app.models.user import User
 
 router = APIRouter()
 UPLOAD_DIR = "uploads"
@@ -19,7 +21,8 @@ vector_store = VectorStore()
 @router.post("/upload")
 def upload_document(
     file: UploadFile = File(...),
-    db: Session = Depends(deps.get_db)
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_user)
 ):
     # 1. Save file
     file_ext = file.filename.split(".")[-1].lower()
@@ -39,6 +42,16 @@ def upload_document(
     db.add(db_doc)
     db.commit()
     db.refresh(db_doc)
+    
+    # Audit Log
+    AuditService.log(
+        db=db,
+        user_id=current_user.id,
+        action="UPLOAD",
+        entity_type="Document",
+        entity_id=db_doc.id,
+        details={"filename": file.filename}
+    )
     
     # 3. Process
     try:
