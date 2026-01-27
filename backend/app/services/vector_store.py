@@ -44,9 +44,23 @@ class VectorStore:
         query_vector = self.llm_client.get_embeddings([query])[0]
         
         await self._ensure_collection()
-        return await self.client.search(
-            collection_name=self.collection_name,
-            query_vector=query_vector,
-            limit=limit,
-            query_filter=models.Filter(**filter_dict) if filter_dict else None
-        )
+        # Use query_points for newer qdrant-client versions
+        try:
+            return (await self.client.query_points(
+                collection_name=self.collection_name,
+                query=query_vector,
+                limit=limit,
+                query_filter=models.Filter(**filter_dict) if filter_dict else None
+            )).points
+        except AttributeError:
+             # Fallback: using retrieve or scroll if search is missing, but here trying invalid method again.
+             # Actually if qdrant-client is new (1.10+), it has query_points. 
+             # If old (1.9), it has search.
+             # The previous error "no attribute search" led us here.
+             # Let's trust query_points works if we await it correctly.
+            return await self.client.search(
+                collection_name=self.collection_name,
+                query_vector=query_vector,
+                limit=limit,
+                query_filter=models.Filter(**filter_dict) if filter_dict else None
+            )

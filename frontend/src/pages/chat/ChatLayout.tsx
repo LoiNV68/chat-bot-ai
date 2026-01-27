@@ -14,8 +14,8 @@ const ChatLayout = () => {
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [isProfileOpen, setIsProfileOpen] = useState(false);
     const [messages, setMessages] = useState<{ role: string; content: string }[]>([
-        { role: 'user', content: 'Xin chào, bạn có thể giúp tôi viết code không?' },
-        { role: 'ai', content: 'Chắc chắn rồi! Tôi đã cập nhật các công nghệ mới nhất. Bạn đang làm việc cụ thể về vấn đề gì?' },
+        // { role: 'user', content: 'Xin chào, bạn có thể giúp tôi viết code không?' },
+        // { role: 'ai', content: 'Chắc chắn rồi! Tôi đã cập nhật các công nghệ mới nhất. Bạn đang làm việc cụ thể về vấn đề gì?' },
     ]);
     const [inputValue, setInputValue] = useState('');
     const [isTyping, setIsTyping] = useState(false);

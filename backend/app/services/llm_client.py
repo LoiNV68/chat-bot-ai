@@ -1,7 +1,11 @@
 from typing import List, Generator
 from app.core.config import settings
-from langchain_community.llms import Ollama
-from langchain_community.embeddings import OllamaEmbeddings
+try:
+    from langchain_ollama import OllamaLLM as Ollama
+    from langchain_ollama import OllamaEmbeddings
+except ImportError:
+    from langchain_community.llms import Ollama
+    from langchain_community.embeddings import OllamaEmbeddings
 from langchain_core.callbacks import CallbackManager, StreamingStdOutCallbackHandler
 
 class LLMClient:
@@ -12,8 +16,8 @@ class LLMClient:
         )
         self.generation_model = Ollama(
             base_url=settings.OLLAMA_BASE_URL,
-            model="qwen2:7b",
-            callback_manager=CallbackManager([StreamingStdOutCallbackHandler()])
+            model="qwen2.5:3b",
+            callbacks=[StreamingStdOutCallbackHandler()]
         )
 
     def get_embeddings(self, texts: List[str]) -> List[List[float]]:
@@ -28,6 +32,8 @@ class LLMClient:
     async def rewrite_query(self, query: str, history: List[str]) -> str:
         prompt = f"""
         Given the following conversation history and a new user query, rephrase the query to be standalone and contextually complete.
+        IMPORTANT: Preserve the original language of the query (likely Vietnamese). Do not translate it to English unless the user asks to.
+        
         History: {history}
         Query: {query}
         Refined Query:

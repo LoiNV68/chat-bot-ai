@@ -39,14 +39,21 @@ class ChatEngine:
         
         # 4. Generate Response
         prompt = f"""
-        Use the following context to answer the user's question. If you don't know the answer, just say that you don't know, don't try to make up an answer.
+        Bạn là một trợ lý AI hữu ích được kết nối với một cơ sở tri thức chuyên biệt.
         
-        Context:
+        Thông tin ngữ cảnh được cung cấp bên dưới:
+        ---------------------
         {context_text}
+        ---------------------
         
-        Question: {refined_query}
+        Dựa trên thông tin ngữ cảnh và kiến thức của bạn, hãy trả lời câu hỏi của người dùng.
+        Nếu ngữ cảnh không chứa câu trả lời, bạn có thể trả lời dựa trên kiến thức chung của mình, nhưng hãy ưu tiên ngữ cảnh nếu nó liên quan.
         
-        Answer:
+        QUAN TRỌNG: Hãy trả lời 100% bằng Tiếng Việt.
+        
+        Câu hỏi: {refined_query}
+        
+        Trả lời:
         """
         
         response = await self.llm.generate_response(prompt)

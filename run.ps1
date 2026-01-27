@@ -11,7 +11,7 @@ Write-Host "Installing Backend dependencies..."
 ../venv/Scripts/python.exe -m pip install -r requirements.txt
 
 # Init DB (Wait for Postgres to be ready might be needed in real scenario, here we assume it's fast enough or re-run)
-Write-Host "Initializing Database..." -ForegroundColor Google
+Write-Host "Initializing Database..." -ForegroundColor Green
 ../venv/Scripts/python.exe -m app.db.init_db
 
 # Start Backend in a new window
