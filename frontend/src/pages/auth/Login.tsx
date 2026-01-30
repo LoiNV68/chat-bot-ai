@@ -41,8 +41,8 @@ const Login = () => {
                 headers: { 'Content-Type': 'multipart/form-data' }
             });
 
-            const { access_token } = response.data;
-            await login(access_token);
+            const { access_token, refresh_token } = response.data;
+            await login(access_token, refresh_token);
             // Redirection handled by useEffect
             
         } catch (err: any) {
