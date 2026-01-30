@@ -20,6 +20,9 @@ class VectorStore:
             )
 
     async def upsert_vectors(self, texts: List[str], metadatas: List[Dict[str, Any]], ids: List[str] = None):
+        if not texts:
+            return
+            
         # Embeddings are synchronous in LangChain integration usually, 
         # but we can optimize this later.
         vectors = self.llm_client.get_embeddings(texts)

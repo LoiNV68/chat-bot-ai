@@ -17,5 +17,10 @@ class DocumentResponse(BaseModel):
     created_at: datetime
     access_scope: AccessScope
     
+    class UserInfo(BaseModel):
+        full_name: str
+    
+    uploader: Optional[UserInfo] = None
+    
     class Config:
         from_attributes = True

@@ -25,22 +25,22 @@ services:
     networks:
       - unimind-network
 
-  ollama:
-    image: ollama/ollama:latest
-    container_name: unimind-ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    networks:
-      - unimind-network
+#   ollama:
+#     image: ollama/ollama:latest
+#     container_name: unimind-ollama
+#     ports:
+#       - "11434:11434"
+#     volumes:
+#       - ollama_data:/root/.ollama
+#     deploy:
+#       resources:
+#         reservations:
+#           devices:
+#             - driver: nvidia
+#               count: 1
+#               capabilities: [gpu]
+#     networks:
+#       - unimind-network
 
 volumes:
   postgres_data:

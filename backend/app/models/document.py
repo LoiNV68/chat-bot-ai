@@ -26,3 +26,7 @@ class Document(Base):
     
     uploaded_by = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
+    file_path = Column(String, nullable=True)
+    
+    from sqlalchemy.orm import relationship
+    uploader = relationship("User", backref="documents")

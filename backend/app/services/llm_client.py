@@ -2,18 +2,22 @@ from typing import List, Generator
 from app.core.config import settings
 try:
     from langchain_ollama import OllamaLLM as Ollama
-    from langchain_ollama import OllamaEmbeddings
 except ImportError:
     from langchain_community.llms import Ollama
-    from langchain_community.embeddings import OllamaEmbeddings
+
+from langchain_ollama import OllamaEmbeddings
 from langchain_core.callbacks import CallbackManager, StreamingStdOutCallbackHandler
+import torch
 
 class LLMClient:
     def __init__(self):
+        # Using Ollama for Embeddings (External Service)
         self.embedding_model = OllamaEmbeddings(
-            base_url=settings.OLLAMA_BASE_URL,
-            model="nomic-embed-text"
+            model="nomic-embed-text",
+            base_url=settings.OLLAMA_BASE_URL
         )
+        
+        # Chat Generation still uses Ollama
         self.generation_model = Ollama(
             base_url=settings.OLLAMA_BASE_URL,
             model="qwen2.5:3b",
@@ -32,10 +36,14 @@ class LLMClient:
     async def rewrite_query(self, query: str, history: List[str]) -> str:
         prompt = f"""
         Given the following conversation history and a new user query, rephrase the query to be standalone and contextually complete.
-        IMPORTANT: Preserve the original language of the query (likely Vietnamese). Do not translate it to English unless the user asks to.
+        
+        CRITICAL INSTRUCTION: The output MUST be in the same language as the user's query (usually Vietnamese). 
+        Do NOT translate the query to English or Chinese or any other language.
+        If the query is in Vietnamese, keeping it in Vietnamese is mandatory.
         
         History: {history}
         Query: {query}
-        Câu hỏi:
+        
+        Rephrased Query (in Vietnamese):
         """
         return self.generation_model.invoke(prompt)

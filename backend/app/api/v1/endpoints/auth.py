@@ -41,6 +41,51 @@ async def login_access_token(
         "access_token": security.create_access_token(
             user.id, expires_delta=access_token_expires
         ),
+        "refresh_token": security.create_refresh_token(
+             user.id
+        ),
+        "token_type": "bearer",
+    }
+
+@router.post("/refresh", response_model=Token)
+async def refresh_token(
+    refresh_token: str,
+    db: AsyncSession = Depends(get_db)
+) -> Any:
+    """
+    Refresh access token
+    """
+    try:
+        from jose import jwt, JWTError
+        payload = jwt.decode(refresh_token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        token_data = payload.get("sub")
+        if token_data is None:
+             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+        
+        # Verify it is a refresh token
+        if payload.get("type") != "refresh":
+             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
+             
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+        
+    # Check if user exists
+    stmt = select(User).where(User.id == int(token_data))
+    result = await db.execute(stmt)
+    user = result.scalars().first()
+    
+    if not user:
+         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+         
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Inactive user")
+
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    return {
+        "access_token": security.create_access_token(
+            user.id, expires_delta=access_token_expires
+        ),
+        "refresh_token": security.create_refresh_token(user.id), # Rotate refresh token
         "token_type": "bearer",
     }
 
