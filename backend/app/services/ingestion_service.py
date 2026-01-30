@@ -15,6 +15,9 @@ import os
 # Global cache for EasyOCR reader
 ocr_reader = None
 
+# Optimize PyTorch memory for shared GPU environments
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 def get_ocr_reader():
     global ocr_reader
     if ocr_reader is None:
@@ -36,12 +39,22 @@ def perform_ocr_on_image(image_obj):
     try:
         reader = get_ocr_reader()
         import numpy as np
-        # Convert PIL Image to numpy array if strict
-        # image_obj should be a PIL Image from page.to_image().original
+        # Convert PIL Image to numpy array
         result = reader.readtext(np.array(image_obj), detail=0)
         return "\n".join(result)
     except Exception as e:
-        print(f"[DEBUG] OCR Thread Error: {e}")
+        print(f"[DEBUG] OCR Error on GPU: {e}")
+        if "out of memory" in str(e).lower():
+             print("[DEBUG] Falling back to CPU for OCR due to OOM...")
+             torch.cuda.empty_cache()
+             try:
+                 import easyocr
+                 # Initialize a fresh reader on CPU
+                 cpu_reader = easyocr.Reader(['vi', 'en'], gpu=False)
+                 result = cpu_reader.readtext(np.array(image_obj), detail=0)
+                 return "\n".join(result)
+             except Exception as cpu_e:
+                 print(f"[DEBUG] OCR CPU Fallback Error: {cpu_e}")
         return ""
 
 class IngestionService:
