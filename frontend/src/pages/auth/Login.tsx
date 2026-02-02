@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Atom, Lock, User, Cpu, Disc } from 'lucide-react';
+import { Atom, Lock, User, Cpu, Disc, Eye, EyeOff } from 'lucide-react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
@@ -11,6 +11,7 @@ const Login = () => {
     const [isLoading, setIsLoading] = useState(false);
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
+    const [showPassword, setShowPassword] = useState(false);
     const [error, setError] = useState('');
     
     const navigate = useNavigate();
@@ -47,7 +48,27 @@ const Login = () => {
             
         } catch (err: any) {
             console.error(err);
-            setError('Đăng nhập thất bại. Vui lòng kiểm tra lại.');
+            let message = 'Đăng nhập thất bại. Vui lòng thử lại.';
+            
+            if (err.response?.data?.detail) {
+                const detail = err.response.data.detail;
+                if (typeof detail === 'string') {
+                    message = detail;
+                } else if (Array.isArray(detail)) {
+                    const firstError = detail[0];
+                    if (firstError?.msg) {
+                        // Map common Pydantic errors
+                        const msg = firstError.msg.toLowerCase();
+                        if (msg.includes('field required')) message = 'Vui lòng điền đầy đủ thông tin';
+                        else if (msg.includes('value is not a valid email')) message = 'Email không đúng định dạng';
+                        else message = firstError.msg;
+                    }
+                }
+            } else if (!err.response) {
+                message = 'Không thể kết nối đến máy chủ. Vui lòng kiểm tra mạng.';
+            }
+            
+            setError(message);
             setIsLoading(false);
         }
     };
@@ -96,16 +117,28 @@ const Login = () => {
                             <div className="relative">
                                 <Lock className="absolute left-3 top-2.5 h-5 w-5 text-slate-500 transition-colors group-focus-within/input:text-cyan-400" />
                                 <Input 
-                                    type="password" 
+                                    type={showPassword ? "text" : "password"} 
                                     placeholder="Nhập mật khẩu" 
-                                    className="pl-10 bg-slate-950/50 border-slate-800 text-slate-100 placeholder:text-slate-600 focus:border-cyan-500/50 focus:ring-cyan-500/20 transition-all duration-300 hover:border-slate-700 h-10"
+                                    className="pl-10 pr-10 bg-slate-950/50 border-slate-800 text-slate-100 placeholder:text-slate-600 focus:border-cyan-500/50 focus:ring-cyan-500/20 transition-all duration-300 hover:border-slate-700 h-10"
                                     value={password}
                                     onChange={(e) => setPassword(e.target.value)}
                                 />
+                                <button
+                                    type="button"
+                                    onClick={() => setShowPassword(!showPassword)}
+                                    className="absolute right-3 top-2.5 text-slate-500 hover:text-cyan-400 transition-colors"
+                                >
+                                    {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                                </button>
                             </div>
                         </div>
                         
-                        {error && <div className="text-red-500 text-sm text-center">{error}</div>}
+                        {error && (
+                            <div className="flex items-center gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-500 text-[11px] animate-in fade-in slide-in-from-top-1">
+                                <Disc className="h-4 w-4 shrink-0" />
+                                <span>{error}</span>
+                            </div>
+                        )}
 
                         <div className="pt-2">
                             <Button className="w-full bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold tracking-wide h-11 shadow-[0_0_20px_-5px_rgba(6,182,212,0.5)] hover:shadow-[0_0_30px_-5px_rgba(6,182,212,0.8)] border-none transition-all duration-300 group-hover:scale-[1.02]">

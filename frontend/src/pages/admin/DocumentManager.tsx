@@ -1,12 +1,13 @@
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardTitle, CardHeader } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { FileText, Upload, Trash2, Shield, Activity, Search, Filter, ArrowLeft, Clock, User, RotateCcw, Archive, Eye, Download } from 'lucide-react';
+import { FileText, Upload, Trash2, Shield, Activity, Search, Filter, ArrowLeft, Clock, User, RotateCcw, Eye, Download } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import { useState, useEffect, useRef } from 'react';
+import ConfirmModal from '@/components/ConfirmModal';
 
 interface Document {
     id: number;
@@ -28,6 +29,8 @@ const DocumentManager = () => {
     const [uploading, setUploading] = useState(false);
     const [file, setFile] = useState<File | null>(null);
     const [viewMode, setViewMode] = useState<'active' | 'trash'>('active');
+    const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+    const [selectedDocId, setSelectedDocId] = useState<number | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
@@ -81,11 +84,16 @@ const DocumentManager = () => {
         }
     };
 
-    const handleDelete = async (id: number) => {
-        if (!confirm('Bạn có chắc muốn xóa tài liệu này?')) return;
+    const handleDeleteClick = (id: number) => {
+        setSelectedDocId(id);
+        setIsDeleteModalOpen(true);
+    };
+
+    const confirmDelete = async () => {
+        if (!selectedDocId) return;
         try {
             const token = localStorage.getItem('token');
-            await axios.delete(`http://localhost:8000/api/v1/documents/${id}`, {
+            await axios.delete(`http://localhost:8000/api/v1/documents/${selectedDocId}`, {
                 headers: { Authorization: `Bearer ${token}` }
             });
             fetchDocuments();
@@ -122,10 +130,8 @@ const DocumentManager = () => {
             const url = window.URL.createObjectURL(blob);
             
             if (isPdf) {
-                // Open PDF in new tab
                 window.open(url, '_blank');
             } else {
-                // Trigger download for other files
                 const link = document.createElement('a');
                 link.href = url;
                 link.setAttribute('download', filename);
@@ -134,12 +140,11 @@ const DocumentManager = () => {
                 link.parentNode?.removeChild(link);
             }
             
-            // Cleanup URL after a delay to ensure download starts
             setTimeout(() => window.URL.revokeObjectURL(url), 100);
             
         } catch (error) {
             console.error('Preview failed', error);
-            alert('Không thể tải file này (có thể file gốc không tồn tại).');
+            alert('Không thể tải file này.');
         }
     };
 
@@ -194,12 +199,10 @@ const DocumentManager = () => {
                     </div>
                 </div>
                 
-                {/* DOCUMENTS SECTION */}
                 <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-300">
-                    {/* Upload Section - Only visible in Active mode */}
                     {viewMode === 'active' && (
                         <Card className="border-cyan-500/20 bg-slate-900/60 backdrop-blur-xl shadow-lg relative overflow-hidden group">
-                                <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-cyan-500/50 to-transparent" />
+                            <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-cyan-500/50 to-transparent" />
                             <CardHeader>
                                 <CardTitle className="text-xl text-slate-100 flex items-center gap-2">
                                    <Upload className="h-5 w-5 text-cyan-400" />
@@ -239,7 +242,6 @@ const DocumentManager = () => {
                         </Card>
                     )}
 
-                    {/* Document List */}
                     <Card className="border-slate-800 bg-slate-900/60 backdrop-blur-xl shadow-xl">
                         <CardHeader className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-slate-800/50 pb-6">
                             <CardTitle className="text-xl text-slate-100 flex items-center gap-2">
@@ -256,7 +258,6 @@ const DocumentManager = () => {
                                 )}
                             </CardTitle>
                             
-                                {/* Search & Filter Toolbar */}
                             <div className="flex gap-2 w-full md:w-auto">
                                 <div className="relative group/search flex-1 md:w-64">
                                     <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-500 group-focus-within/search:text-cyan-400 transition-colors" />
@@ -343,7 +344,7 @@ const DocumentManager = () => {
                                                             <Button 
                                                                 size="sm" 
                                                                 variant="ghost" 
-                                                                onClick={() => handleDelete(doc.id)}
+                                                                onClick={() => handleDeleteClick(doc.id)}
                                                                 className="text-slate-400 hover:text-red-400 hover:bg-red-500/10 opacity-70 group-hover:opacity-100 transition-all"
                                                                 title="Xóa"
                                                             >
@@ -371,6 +372,16 @@ const DocumentManager = () => {
                     </Card>
                 </div>
             </div>
+
+            <ConfirmModal 
+                isOpen={isDeleteModalOpen}
+                title="Xóa tài liệu?"
+                message="Bạn có chắc chắn muốn xóa tài liệu này? Hành động này sẽ chuyển tài liệu vào thùng rác."
+                confirmText="Xóa ngay"
+                cancelText="Quay lại"
+                onConfirm={confirmDelete}
+                onCancel={() => setIsDeleteModalOpen(false)}
+            />
         </div>
     );
 };

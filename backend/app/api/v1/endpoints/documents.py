@@ -84,7 +84,7 @@ async def delete_document(
     """
     doc = await db.get(Document, doc_id)
     if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+        raise HTTPException(status_code=404, detail="Không tìm thấy tài liệu")
     
     doc.is_active = False
     await db.commit()
@@ -101,7 +101,7 @@ async def restore_document(
     """
     doc = await db.get(Document, doc_id)
     if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+        raise HTTPException(status_code=404, detail="Không tìm thấy tài liệu")
     
     doc.is_active = True
     await db.commit()
@@ -140,9 +140,9 @@ async def get_document_content(
     """
     doc = await db.get(Document, doc_id)
     if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+        raise HTTPException(status_code=404, detail="Không tìm thấy tài liệu")
     
     if not doc.file_path or not os.path.exists(doc.file_path):
-        raise HTTPException(status_code=404, detail="File not found on server")
+        raise HTTPException(status_code=404, detail="Tệp không tồn tại trên máy chủ")
     
     return FileResponse(doc.file_path, filename=doc.filename, media_type="application/pdf" if doc.filename.endswith(".pdf") else None)

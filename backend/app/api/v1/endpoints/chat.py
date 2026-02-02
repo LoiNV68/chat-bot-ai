@@ -43,7 +43,7 @@ async def chat_completion(
         result = await db.execute(select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == current_user.id))
         session = result.scalars().first()
         if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
+            raise HTTPException(status_code=404, detail="Không tìm thấy phiên làm việc")
         # Update timestamp
         session.updated_at = datetime.utcnow() # Import datetime? No, sqlalchemy handles default? No, onupdate. But manual update implies touch.
         # Actually onupdate handles it if we commit.
@@ -77,7 +77,7 @@ async def chat_completion(
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Chat Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Lỗi Hệ thống Chat: {str(e)}")
     
     # 5. Save AI Response
     # Re-fetch session to ensure it's attached if needed, or just add new message
@@ -124,7 +124,7 @@ async def delete_session(
     result = await db.execute(select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == current_user.id))
     session = result.scalars().first()
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail="Không tìm thấy phiên làm việc")
     
     await db.delete(session) # Cascade should handle messages
     await db.commit()
@@ -143,7 +143,7 @@ async def update_session(
     result = await db.execute(select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == current_user.id))
     session = result.scalars().first()
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail="Không tìm thấy phiên làm việc")
     
     if session_in.title is not None:
         session.title = session_in.title
@@ -167,7 +167,7 @@ async def list_messages(
     result = await db.execute(select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == current_user.id))
     session = result.scalars().first()
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail="Không tìm thấy phiên làm việc")
         
     result = await db.execute(
         select(ChatMessage)

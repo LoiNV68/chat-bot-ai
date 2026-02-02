@@ -31,10 +31,10 @@ async def login_access_token(
     user = result.scalars().first()
     
     if not user or not security.verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(status_code=400, detail="Incorrect email or password")
+        raise HTTPException(status_code=400, detail="Email hoặc mật khẩu không chính xác")
     
     if not user.is_active:
-        raise HTTPException(status_code=400, detail="Inactive user")
+        raise HTTPException(status_code=400, detail="Tài khoản không còn hoạt động")
         
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     return {
@@ -60,14 +60,14 @@ async def refresh_token(
         payload = jwt.decode(refresh_token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         token_data = payload.get("sub")
         if token_data is None:
-             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Phiên đăng nhập không hợp lệ")
         
         # Verify it is a refresh token
         if payload.get("type") != "refresh":
-             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
+             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Loại token không hợp lệ")
              
     except JWTError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Phiên đăng nhập đã hết hạn hoặc không hợp lệ")
         
     # Check if user exists
     stmt = select(User).where(User.id == int(token_data))
@@ -75,10 +75,10 @@ async def refresh_token(
     user = result.scalars().first()
     
     if not user:
-         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy người dùng")
          
     if not user.is_active:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Inactive user")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tài khoản không còn hoạt động")
 
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     return {
@@ -104,7 +104,7 @@ async def create_user(
     if user:
         raise HTTPException(
             status_code=400,
-            detail="The user with this username already exists in the system",
+            detail="Tài khoản email này đã tồn tại trong hệ thống",
         )
     
     user = User(

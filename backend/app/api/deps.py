@@ -27,7 +27,7 @@ async def get_current_user(
     except (JWTError, ValidationError):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Could not validate credentials",
+            detail="Không thể xác thực thông tin đăng nhập",
         )
     
     stmt = select(User).where(User.id == token_data.sub)
@@ -35,9 +35,9 @@ async def get_current_user(
     user = result.scalars().first()
     
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
     if not user.is_active:
-        raise HTTPException(status_code=400, detail="Inactive user")
+        raise HTTPException(status_code=400, detail="Tài khoản không còn hoạt động")
     return user
 
 async def get_current_active_superuser(
@@ -45,6 +45,6 @@ async def get_current_active_superuser(
 ) -> User:
     if not current_user.is_superuser:
         raise HTTPException(
-            status_code=400, detail="The user doesn't have enough privileges"
+            status_code=400, detail="Người dùng không có đủ quyền hạn"
         )
     return current_user

@@ -4,9 +4,13 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import axios from 'axios';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useAuth } from '@/context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import UserProfileDialog from '@/components/UserProfileDialog';
+import ConfirmModal from '@/components/ConfirmModal';
+import RenameModal from '@/components/RenameModal';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -126,7 +130,6 @@ const SidebarContent = ({
                                 <span className="truncate flex-1">{session.title || "New Chat"}</span>
                                 {session.is_pinned && <Pin className="h-3 w-3 text-cyan-500 shrink-0" />}
                                 
-                                {/* Options Dropdown */}
                                 <DropdownMenu>
                                     <DropdownMenuTrigger asChild>
                                         <Button
@@ -211,7 +214,6 @@ const ChatLayout = () => {
     const [isCollapsed, setIsCollapsed] = useState(false);
     const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
     
-    // Chat State
     const [sessions, setSessions] = useState<ChatSession[]>([]);
     const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
     const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -221,12 +223,10 @@ const ChatLayout = () => {
     const [lastMessageTime, setLastMessageTime] = useState(0);
     const COOLDOWN_MS = 2000;
 
-    // Fetch sessions on load
     useEffect(() => {
         fetchSessions();
     }, []);
 
-    // Close mobile menu on resize
     useEffect(() => {
         const handleResize = () => {
             if (window.innerWidth >= 768) setIsMobileMenuOpen(false);
@@ -271,7 +271,7 @@ const ChatLayout = () => {
         }
         
         const newMessages = [...messages, { role: 'user', content: inputValue }];
-        setMessages(newMessages); // Optimistic update
+        setMessages(newMessages);
         setInputValue('');
         setIsTyping(true);
         setLastMessageTime(now);
@@ -288,15 +288,12 @@ const ChatLayout = () => {
                 { headers: { Authorization: `Bearer ${token}` } }
             );
 
-            // If new session started
             if (!currentSessionId && response.data.session_id) {
                 setCurrentSessionId(response.data.session_id);
-                fetchSessions(); // Refresh list to show new session
+                fetchSessions();
             }
 
             setMessages(prev => [...prev, { role: 'ai', content: response.data.answer }]);
-            
-            // Refresh sessions if title might have changed (for new sessions mainly) or just reorder
             if (!currentSessionId) fetchSessions();
 
         } catch (error: any) {
@@ -316,7 +313,6 @@ const ChatLayout = () => {
 
     const toggleSidebar = () => setIsCollapsed(!isCollapsed);
 
-    // Session Management Actions
     const handlePinSession = async (e: React.MouseEvent, session: ChatSession) => {
         e.stopPropagation();
         try {
@@ -331,30 +327,46 @@ const ChatLayout = () => {
         }
     };
 
+    const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+    const [isRenameModalOpen, setIsRenameModalOpen] = useState(false);
+    const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+    const [selectedSessionTitle, setSelectedSessionTitle] = useState('');
+
     const handleDeleteSession = async (e: React.MouseEvent, sessionId: string) => {
         e.stopPropagation();
-        if (!confirm('Bạn có chắc chắn muốn xóa cuộc trò chuyện này?')) return;
-        
+        setSelectedSessionId(sessionId);
+        setIsDeleteModalOpen(true);
+    };
+
+    const confirmDeleteSession = async () => {
+        if (!selectedSessionId) return;
         try {
             const token = localStorage.getItem('token');
-            await axios.delete(`http://localhost:8000/api/v1/chat/sessions/${sessionId}`, {
+            await axios.delete(`http://localhost:8000/api/v1/chat/sessions/${selectedSessionId}`, {
                 headers: { Authorization: `Bearer ${token}` }
             });
-            if (currentSessionId === sessionId) handleNewChat();
+            if (currentSessionId === selectedSessionId) handleNewChat();
             fetchSessions();
         } catch (error) {
             console.error('Failed to delete session:', error);
         }
     };
 
-    const handleRenameSession = async (e: React.MouseEvent, sessionId: string) => {
+    const handleRenameSession = (e: React.MouseEvent, sessionId: string) => {
         e.stopPropagation();
-        const newTitle = prompt('Nhập tên mới cho cuộc trò chuyện:');
-        if (!newTitle) return;
+        const session = sessions.find(s => s.id === sessionId);
+        if (session) {
+            setSelectedSessionId(sessionId);
+            setSelectedSessionTitle(session.title || '');
+            setIsRenameModalOpen(true);
+        }
+    };
 
+    const confirmRenameSession = async (newTitle: string) => {
+        if (!selectedSessionId) return;
         try {
             const token = localStorage.getItem('token');
-            await axios.patch(`http://localhost:8000/api/v1/chat/sessions/${sessionId}`, 
+            await axios.patch(`http://localhost:8000/api/v1/chat/sessions/${selectedSessionId}`, 
                 { title: newTitle },
                 { headers: { Authorization: `Bearer ${token}` } }
             );
@@ -363,8 +375,6 @@ const ChatLayout = () => {
             console.error('Failed to rename session:', error);
         }
     };
-
-
 
     return (
         <div className="relative flex h-screen overflow-hidden bg-slate-950 font-sans text-slate-100 selection:bg-cyan-500/30">
@@ -426,6 +436,22 @@ const ChatLayout = () => {
             
             <UserProfileDialog isOpen={isProfileOpen} onClose={() => setIsProfileOpen(false)} />
 
+            <ConfirmModal 
+                isOpen={isDeleteModalOpen}
+                title="Xóa cuộc trò chuyện?"
+                message="Bạn có chắc chắn muốn xóa cuộc trò chuyện này? Toàn bộ lịch sử tin nhắn sẽ bị mất vĩnh viễn."
+                onConfirm={confirmDeleteSession}
+                onCancel={() => setIsDeleteModalOpen(false)}
+            />
+
+            <RenameModal 
+                isOpen={isRenameModalOpen}
+                title="Đổi tên cuộc trò chuyện"
+                initialValue={selectedSessionTitle}
+                onRename={confirmRenameSession}
+                onCancel={() => setIsRenameModalOpen(false)}
+            />
+
             <div className="flex flex-1 flex-col z-10 relative">
                 <header className="flex h-16 items-center border-b border-slate-800 bg-slate-900/40 backdrop-blur-md px-4 md:hidden justify-between">
                     <div className="flex items-center gap-3">
@@ -472,7 +498,17 @@ const ChatLayout = () => {
                                         : "bg-slate-900/80 backdrop-blur-sm dark:text-slate-100 rounded-2xl rounded-tl-sm border border-slate-700/50"
                                 )}
                             >
-                                {msg.content}
+                                <div className={cn(
+                                    "prose prose-sm dark:prose-invert max-w-none break-words",
+                                    "prose-p:m-0 prose-p:leading-relaxed", 
+                                    "prose-ul:m-0 prose-ul:pl-4",
+                                    "prose-li:m-0",
+                                    "prose-strong:font-semibold prose-strong:text-cyan-400"
+                                )}>
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                        {msg.content}
+                                    </ReactMarkdown>
+                                </div>
                             </div>
                             {msg.role === 'user' && (
                                 <div className="flex h-8 w-8 shrink-0 select-none items-center justify-center rounded-full bg-blue-600/20 border border-blue-500/30 text-blue-400">
