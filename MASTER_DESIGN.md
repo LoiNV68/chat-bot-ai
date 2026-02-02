@@ -1,4 +1,4 @@
-# UNIMIND CORE 2.0 – SYSTEM ARCHITECTURE DOCUMENT
+# FBU AI Chatbot – SYSTEM ARCHITECTURE DOCUMENT
 
 | Metadata | Details |
 | :--- | :--- |

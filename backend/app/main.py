@@ -29,7 +29,7 @@ if settings.BACKEND_CORS_ORIGINS:
 
 @app.get("/")
 def root():
-    return {"message": "Welcome to Unimind Core 2.0 API"}
+    return {"message": "Welcome to FBU AI Chatbot API"}
 
 from app.api.api import api_router
 app.include_router(api_router, prefix=settings.API_V1_STR)
