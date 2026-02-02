@@ -14,6 +14,7 @@ interface Document {
     filename: string;
     version: number;
     is_active: boolean;
+    is_processed: boolean;
     created_at: string;
     access_scope: string;
     uploader?: {
@@ -321,12 +322,12 @@ const DocumentManager = () => {
                                                 <td className="p-4">
                                                     <span className={cn(
                                                         "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border",
-                                                        doc.is_active 
+                                                        doc.is_processed 
                                                             ? "bg-green-500/10 text-green-400 border-green-500/20" 
-                                                            : "bg-red-500/10 text-red-400 border-red-500/20"
+                                                            : "bg-yellow-500/10 text-yellow-400 border-yellow-500/20"
                                                     )}>
                                                         <Activity className="h-3 w-3" />
-                                                        {doc.is_active ? 'Hoạt động' : 'Đã xóa'}
+                                                        {doc.is_processed ? 'Đã xử lý' : 'Đang xử lý'}
                                                     </span>
                                                 </td>
                                                 <td className="p-4 text-right">

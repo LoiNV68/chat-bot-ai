@@ -38,18 +38,49 @@ class LLMClient:
         return self.generation_model.invoke(prompt)
 
     async def rewrite_query(self, query: str, history: List[str]) -> str:
-        prompt = f"""
-        Given the following conversation history and a new user query, rephrase the query to be standalone and contextually complete.
+        query_lower = query.lower().strip()
         
-        CRITICAL INSTRUCTION: The output MUST be in the same language as the user's query (usually Vietnamese). 
-        Do NOT translate the query to English or Chinese or any other language.
-        If the query is in Vietnamese, keeping it in Vietnamese is mandatory.
+        # Skip rewriting for simple greetings (exact match or very short)
+        greeting_patterns = ['xin chào', 'chào bạn', 'chào', 'hello', 'hi', 'bạn là ai', 'cảm ơn', 'thanks', 'hey']
         
-        History: {history}
-        Query: {query}
+        # If it's a simple greeting (exact match or very short), skip rewriting
+        if query_lower in greeting_patterns or len(query_lower) <= 5:
+            return query
+
+        # For follow-up queries with history, check if context-dependent and rewrite
+        followup_patterns = ['chi tiết', 'thêm', 'rõ hơn', 'ví dụ', 'cụ thể', 'giải thích', 'còn gì', 'nữa không']
+        is_context_dependent = any(p in query_lower for p in followup_patterns)
         
-        Rephrased Query (in Vietnamese):
-        """
-        # if torch.cuda.is_available():
-        #     torch.cuda.empty_cache()
-        return self.generation_model.invoke(prompt)
+        # If no history and not context-dependent, return as-is
+        if not history and not is_context_dependent:
+            return query
+
+            
+        prompt = f"""Bạn là một trợ lý viết lại câu hỏi.
+
+NHIỆM VỤ: Kết hợp câu hỏi hiện tại với ngữ cảnh từ lịch sử hội thoại để tạo thành câu hỏi hoàn chỉnh, độc lập.
+
+VÍ DỤ:
+- Lịch sử: "Quy trình nộp hồ sơ học phí" -> AI trả lời
+- Câu hỏi: "chi tiết hơn"
+- Kết quả: "Cho tôi biết chi tiết hơn về quy trình nộp hồ sơ miễn giảm học phí"
+
+QUY TẮC BẮT BUỘC:
+1. CHỈ xuất ra câu hỏi đã viết lại, KHÔNG thêm giải thích.
+2. PHẢI viết 100% bằng tiếng Việt thuần túy.
+3. KHÔNG thêm ký tự Nga, Trung, Hàn, Nhật.
+4. Nếu không có ngữ cảnh liên quan, trả về câu hỏi gốc.
+
+Lịch sử hội thoại (10 tin nhắn gần nhất):
+{history[-10:] if history else 'Không có'}
+
+Câu hỏi hiện tại: {query}
+
+Câu hỏi hoàn chỉnh:"""
+        result = self.generation_model.invoke(prompt)
+        # Clean any non-Vietnamese characters that might slip through
+        import re
+        cleaned = re.sub(r'[а-яА-Яа-яёЁ\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]', '', result)
+        return cleaned.strip() if cleaned.strip() else query
+
+

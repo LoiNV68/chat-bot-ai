@@ -210,6 +210,13 @@ class IngestionService:
         try:
             await self.vector_store.upsert_vectors(texts, metadatas_list, ids)
             print(f"[DEBUG] Background ingestion COMPLETED for doc {doc_id}.")
+            
+            # Update is_processed flag in database
+            async with self.db.begin():
+                await self.db.execute(
+                    update(Document).where(Document.id == doc_id).values(is_processed=True)
+                )
+            print(f"[DEBUG] Document {doc_id} marked as processed.")
         except Exception as e:
             print(f"[DEBUG] Vector upsert failed: {e}")
 

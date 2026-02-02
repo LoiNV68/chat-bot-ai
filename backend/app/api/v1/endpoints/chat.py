@@ -37,16 +37,13 @@ async def chat_completion(
             title=chat_request.query[:50] + "..." if len(chat_request.query) > 50 else chat_request.query
         )
         db.add(new_session)
-        # We don't commit yet, wait for success
     else:
         # Verify session ownership
         result = await db.execute(select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == current_user.id))
         session = result.scalars().first()
         if not session:
             raise HTTPException(status_code=404, detail="Không tìm thấy phiên làm việc")
-        # Update timestamp
-        session.updated_at = datetime.utcnow() # Import datetime? No, sqlalchemy handles default? No, onupdate. But manual update implies touch.
-        # Actually onupdate handles it if we commit.
+        session.updated_at = datetime.utcnow()
     
     # 2. Save User Message
     user_msg = ChatMessage(
@@ -55,42 +52,54 @@ async def chat_completion(
         content=chat_request.query
     )
     db.add(user_msg)
-    await db.commit() # Commit user message immediately
+    await db.commit()
     
-    # 3. Get History for context
-    # Fetch last N messages
+    # 3. Get History for context (before long LLM call)
     history_result = await db.execute(
         select(ChatMessage)
         .where(ChatMessage.session_id == session_id)
         .order_by(ChatMessage.created_at.asc())
     )
     history_msgs = history_result.scalars().all()
-    history_strings = [msg.content for msg in history_msgs] # Simplified. Ideally should be Role: Content
+    history_strings = [msg.content for msg in history_msgs]
     
-    # 4. Generate Response
+    # 4. Generate Response (this can take a long time - connection may timeout)
     try:
-        response_text = await chat_engine.chat(
+        chat_result = await chat_engine.chat(
             user_query=chat_request.query,
             history=history_strings, 
             user_info=current_user
         )
+        response_text = chat_result['answer']
+        sources = chat_result['sources']
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Lỗi Hệ thống Chat: {str(e)}")
     
-    # 5. Save AI Response
-    # Re-fetch session to ensure it's attached if needed, or just add new message
-    ai_msg = ChatMessage(
-        session_id=session_id,
-        role="ai",
-        content=response_text
-    )
-    db.add(ai_msg)
+    # 5. Save AI Response - Use a new transaction to avoid stale connection
+    try:
+        ai_msg = ChatMessage(
+            session_id=session_id,
+            role="ai",
+            content=response_text
+        )
+        db.add(ai_msg)
+        await db.commit()
+    except Exception as db_error:
+        print(f"[WARN] DB commit failed, attempting rollback: {db_error}")
+        await db.rollback()
+        ai_msg_retry = ChatMessage(
+            session_id=session_id,
+            role="ai",
+            content=response_text
+        )
+        db.add(ai_msg_retry)
+        await db.commit()
     
-    await db.commit()
-    
-    return chat_schema.ChatResponse(answer=response_text, session_id=session_id)
+    return chat_schema.ChatResponse(answer=response_text, session_id=session_id, sources=sources)
+
+
 
 @router.get("/sessions", response_model=List[chat_schema.ChatSession])
 async def list_sessions(

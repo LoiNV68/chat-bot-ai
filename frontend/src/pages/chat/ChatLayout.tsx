@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Send, Bot, User, Plus, MessageSquare, Settings, Menu, LogOut, Shield, Loader2, PanelLeftClose, PanelLeftOpen, X, MoreHorizontal, Pin, PinOff, Pencil, Trash } from 'lucide-react';
+import { Send, Bot, User, Plus, MessageSquare, Settings, Menu, LogOut, Shield, Loader2, PanelLeftClose, PanelLeftOpen, X, MoreHorizontal, Pin, PinOff, Pencil, Trash, FileText, Download } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
@@ -25,9 +25,16 @@ interface ChatSession {
     updated_at: string;
 }
 
+interface SourceDocument {
+    doc_id: number;
+    filename: string;
+    score: number;
+}
+
 interface ChatMessage {
     role: string;
     content: string;
+    sources?: SourceDocument[];
 }
 
 interface SidebarContentProps {
@@ -293,8 +300,13 @@ const ChatLayout = () => {
                 fetchSessions();
             }
 
-            setMessages(prev => [...prev, { role: 'ai', content: response.data.answer }]);
+            setMessages(prev => [...prev, { 
+                role: 'ai', 
+                content: response.data.answer,
+                sources: response.data.sources || []
+            }]);
             if (!currentSessionId) fetchSessions();
+
 
         } catch (error: any) {
             console.error('Chat error:', error);
@@ -509,7 +521,35 @@ const ChatLayout = () => {
                                         {msg.content}
                                     </ReactMarkdown>
                                 </div>
+                                
+                                {/* Source Documents Section */}
+                                {msg.role === 'ai' && msg.sources && msg.sources.length > 0 && (
+                                    <div className="mt-4 pt-3 border-t border-slate-700/50">
+                                        <div className="flex items-center gap-2 text-xs text-slate-400 mb-2">
+                                            <FileText className="h-3.5 w-3.5" />
+                                            <span className="font-medium">Tài liệu tham khảo:</span>
+                                        </div>
+                                        <div className="flex flex-col gap-1.5">
+                                            {msg.sources.map((source, idx) => (
+                                                <a
+                                                    key={idx}
+                                                    href={`http://localhost:8000/api/v1/documents/${source.doc_id}/content`}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-slate-800/50 hover:bg-slate-700/50 border border-slate-700/30 hover:border-cyan-500/30 transition-all group text-xs"
+                                                >
+                                                    <FileText className="h-3.5 w-3.5 text-cyan-500/70 group-hover:text-cyan-400" />
+                                                    <span className="text-slate-300 group-hover:text-cyan-300 truncate flex-1">
+                                                        {source.filename}
+                                                    </span>
+                                                    <Download className="h-3 w-3 text-slate-500 group-hover:text-cyan-400" />
+                                                </a>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
                             </div>
+
                             {msg.role === 'user' && (
                                 <div className="flex h-8 w-8 shrink-0 select-none items-center justify-center rounded-full bg-blue-600/20 border border-blue-500/30 text-blue-400">
                                     <User className="h-5 w-5" />

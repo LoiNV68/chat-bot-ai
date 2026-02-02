@@ -14,6 +14,7 @@ class DocumentResponse(BaseModel):
     filename: str
     version: int
     is_active: bool
+    is_processed: bool = False
     created_at: datetime
     access_scope: AccessScope
     

@@ -46,10 +46,16 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None # If provided, continues session
     history: List[str] = [] # Legacy support or explicit context
 
+class SourceDocument(BaseModel):
+    doc_id: int
+    filename: str
+    score: float
+
 class ChatResponse(BaseModel):
     answer: str
     session_id: str
-    sources: List[str] = []
+    sources: List[SourceDocument] = []
+
 
 class FeedbackCreate(BaseModel):
     chat_message_id: int

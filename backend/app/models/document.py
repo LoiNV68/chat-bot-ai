@@ -16,6 +16,7 @@ class Document(Base):
     
     # Versioning Control
     is_active = Column(Boolean, default=True)
+    is_processed = Column(Boolean, default=False)  # True when ingested to vector store
     effective_date = Column(DateTime, nullable=True) # Start date of validity
     expiry_date = Column(DateTime, nullable=True)    # Expiry date
     parent_id = Column(Integer, ForeignKey("documents.id"), nullable=True) # Link to old version
@@ -27,6 +28,7 @@ class Document(Base):
     uploaded_by = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
     file_path = Column(String, nullable=True)
+
     
     from sqlalchemy.orm import relationship
     uploader = relationship("User", backref="documents")
