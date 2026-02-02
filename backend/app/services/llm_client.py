@@ -7,7 +7,7 @@ except ImportError:
 
 from langchain_ollama import OllamaEmbeddings
 from langchain_core.callbacks import CallbackManager, StreamingStdOutCallbackHandler
-import torch
+# import torch
 
 class LLMClient:
     def __init__(self):
@@ -20,7 +20,7 @@ class LLMClient:
         # Chat Generation still uses Ollama
         self.generation_model = Ollama(
             base_url=settings.OLLAMA_BASE_URL,
-            model="qwen2.5:3b",
+            model=settings.LLM_MODEL,
             callbacks=[StreamingStdOutCallbackHandler()],
             # CRITICAL for 6GB GPU: Aggressively unload model after use to prevent OOM
             keep_alive="1m" 
@@ -33,8 +33,8 @@ class LLMClient:
         # Langchain Ollama implementation might be sync or support sync.
         # For stream, we might need to use proper async calls or use the stream method.
         # This is a simplified wrapper.
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # if torch.cuda.is_available():
+        #     torch.cuda.empty_cache()
         return self.generation_model.invoke(prompt)
 
     async def rewrite_query(self, query: str, history: List[str]) -> str:
@@ -50,6 +50,6 @@ class LLMClient:
         
         Rephrased Query (in Vietnamese):
         """
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # if torch.cuda.is_available():
+        #     torch.cuda.empty_cache()
         return self.generation_model.invoke(prompt)

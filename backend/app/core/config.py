@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     QDRANT_PORT: int = int(os.getenv("QDRANT_PORT", 6333))
 
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "qwen2.5:7b")
 
     SECRET_KEY: str = os.getenv("SECRET_KEY", "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7")
     ALGORITHM: str = "HS256"

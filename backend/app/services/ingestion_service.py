@@ -200,7 +200,8 @@ class IngestionService:
                 "version": version,
                 "access_scope": scope,
                 "target_id": target_id,
-                "content": texts[i] 
+                "content": texts[i],
+                "is_active": True # CRITICAL for ChatEngine filtering 
             })
             
         ids = [str(uuid.uuid4()) for _ in range(len(texts))]

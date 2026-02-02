@@ -17,34 +17,24 @@ class ChatEngine:
         
         # 3. Retrieve Context
         # Using refined_query for vector search
-        search_results = await self.vector_store.search(refined_query, filter_dict=filters)
+        # Increasing limit to 10 for better coverage, but applying threshold
+        search_results = await self.vector_store.search(refined_query, limit=10, filter_dict=filters)
         
-        context_docs = [hit.payload.get('payload', {}).get('content', '') for hit in search_results] # Payload structure depends on point creation
+        # 3.1 Apply Similarity Threshold (Filter out weak matches)
+        THRESHOLD = 0.7
+        valid_hits = [hit for hit in search_results if hit.score >= THRESHOLD]
         
-        # Adjusting context extraction based on point structure in VectorStore
-        # In VectorStore.upsert_vectors: payload=metadatas[i]
-        # And in IngestionService: chunk['content'] is separate from 'metadata'.
-        # Wait, VectorStore implementation put 'payload' as `metadatas[i]`. 
-        # But `upsert_vectors` takes `texts` separately to embed.
-        # We should store existing text in metadata (payload) to retrieve it later, 
-        # OR Qdrant must store it. 
-        # Reviewing VectorStore: it puts metadata as payload. 
-        # In IngestionService: metadata DOES NOT contain 'content'. 
-        # FIX: We need to include content in metadata/payload to retrieve it.
-        
-        # For now, let's assume content is in payload or we need to fix IngestionService.
-        # Let's fix retrieval here assuming we fix IngestionService or VectorStore.
-        
-        context_text = "\n\n".join([hit.payload.get('content', '') for hit in search_results])
+        # Extract content from payload
+        context_text = "\n\n".join([hit.payload.get('content', '') for hit in valid_hits])
         
         # 4. Generate Response
         prompt = f"""
         Bạn là Chat Bot AI của FBU (Trường Đại học Tài chính - Ngân hàng Hà Nội), một trợ lý ảo thông minh và thân thiện.
-        NHIỆM VỤ CỦA BẠN: Hỗ trợ sinh viên, giảng viên và cán bộ nhân viên giải đáp thắc mắc dựa trên cơ sở tri thức của trường.
+        NHIỆM VỤ CỦA BẠN: Hỗ trợ sinh viên, giảng viên và cán bộ nhân viên giải đáp thắc mắc TUYỆT ĐỐI DỰA TRÊN CƠ SỞ TRI THỨC ĐƯỢC CUNG CẤP.
         
-        NẾU ĐƯỢC HỎI "BẠN LÀ AI": Hãy trả lời "Tôi là Chat Bot AI của FBU, sẵn sàng hỗ trợ bạn các thông tin về trường Đại học Tài chính - Ngân hàng Hà Nội."
-        NẾU ĐƯỢC HỎI "BẠN ĐƯỢC TẠO RA BỞI AI": Hãy trả lời "Tôi được tạo ra bời Nguyễn Văn Lợi, sinh viên năm 4 của trường Đại học Tài chính - Ngân hàng Hà Nội khóa 11."
-        NẾU ĐƯỢC HỎI "BẠN BIẾT GÌ VỀ TRƯỜNG ĐẠI HỌC TÀI CHÍNH - NGÂN HÀNG HÀ NỘI, HOẶC CÁC CÂU HỎI TƯƠNG ĐƯƠNG": Hãy trả lời "Trường Đại học Tài chính - Ngân hàng Hà Nội (FBU) được thành lập theo Quyết định số 2336/QĐ-TTg ngày 21/12/2010 của Thủ tướng Chính phủ. Đây là cơ sở giáo dục đại học tư thục, có trụ sở chính tại huyện Mê Linh, thành phố Hà Nội. Trường chính thức đi vào hoạt động và tuyển sinh từ năm 2012. 
+        NẾU ĐƯỢC HỎI "BẠN LÀ AI": HÃY TRẢ LỜI "Tôi là Chat Bot AI của FBU, sẵn sàng hỗ trợ bạn các thông tin về trường Đại học Tài chính - Ngân hàng Hà Nội."
+        NẾU ĐƯỢC HỎI "BẠN ĐƯỢC TẠO RA BỞI AI": HÃY TRẢ LỜI "Tôi được tạo ra bời NGUYỄN VĂN LỢI, sinh viên năm 4 của trường Đại học Tài chính - Ngân hàng Hà Nội khóa 11."
+        NẾU ĐƯỢC HỎI "BẠN BIẾT GÌ VỀ TRƯỜNG ĐẠI HỌC TÀI CHÍNH - NGÂN HÀNG HÀ NỘI, HOẶC CÁC CÂU HỎI TƯƠNG ĐƯƠNG": HÃY TRẢ LỜI "Trường Đại học Tài chính - Ngân hàng Hà Nội (FBU) được thành lập theo Quyết định số 2336/QĐ-TTg ngày 21/12/2010 của Thủ tướng Chính phủ. Đây là cơ sở giáo dục đại học tư thục, có trụ sở chính tại huyện Mê Linh, thành phố Hà Nội. Trường chính thức đi vào hoạt động và tuyển sinh từ năm 2012. 
                                                                                                                                 Ngày thành lập: 21/12/2010.
                                                                                                                                 Tên tiếng Anh: Hanoi Financial and Banking University (FBU).
                                                                                                                                 Loại hình: Đại học tư thục.
@@ -55,10 +45,19 @@ class ChatEngine:
         {context_text}
         ---------------------
         
-        Dựa trên thông tin ngữ cảnh và kiến thức của bạn, hãy trả lời câu hỏi của người dùng.
-        Nếu ngữ cảnh không chứa câu trả lời, bạn có thể trả lời dựa trên kiến thức chung, nhưng hãy ưu tiên ngữ cảnh.
+        CHỈ DẪN QUAN TRỌNG:
+        1. CHỈ sử dụng thông tin trong phần "Thông tin ngữ cảnh" để trả lời nếu nó có liên quan trực tiếp đến câu hỏi.
+        2. Nếu phần ngữ cảnh TRỐNG hoặc KHÔNG LIÊN QUAN đến câu hỏi (ví dụ: người dùng chỉ chào hỏi), HÃY TRẢ LỜI một cách lịch sự dựa trên vai trò trợ lý của bạn mà KHÔNG gợi ý các thông tin chuyên môn không được hỏi. TUYỆT ĐỐI KHÔNG BỊA THÊM THÔNG TIN GỢI Ý SAI SỰ THẬT NÀO.
+        3. TUYỆT ĐỐI KHÔNG bịa đặt thông tin hoặc lấy ví dụ từ ngữ cảnh nếu ví dụ đó không được người dùng yêu cầu.
+        4. Nếu người dùng hỏi về kiến thức chuyên môn mà không có trong ngữ cảnh, HÃY TRẢ LỜI: "Xin lỗi, tôi không tìm thấy thông tin này trong tài liệu được cung cấp."
         
-        QUAN TRỌNG: Hãy trả lời 100% bằng Tiếng Việt.
+        YÊU CẦU VỀ TRÌNH BÀY:
+        - Sử dụng định dạng **Markdown** để câu trả lời đẹp và dễ đọc.
+        - Sử dụng **in đậm** cho các ý chính hoặc từ khóa quan trọng.
+        - Sử dụng **dấu gạch đầu dòng** (-) hoặc **số thứ tự** (1., 2.) để liệt kê các bước hoặc danh sách.
+        - Tách đoạn rõ ràng, không viết thành một khối văn bản dài.
+        
+        QUAN TRỌNG: HÃY TRẢ LỜI 100% bằng Tiếng Việt.
         
         Câu hỏi: {refined_query}
         
