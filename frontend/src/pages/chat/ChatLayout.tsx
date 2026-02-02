@@ -177,13 +177,24 @@ const SidebarContent = ({
                         <User className="h-4 w-4 text-slate-400" />
                         <span>Thông tin cá nhân</span>
                     </button>
-                    {user?.is_superuser && (
+                    {/* Document Management: Admin or Lecturer */}
+                    {(user?.is_superuser || user?.role === 'lecturer' || user?.role === 'admin') && (
                         <button
                             onClick={() => navigate('/admin')}
                             className="flex w-full items-center gap-3 px-4 py-3 text-sm text-cyan-400 hover:bg-cyan-500/10 transition-colors border-b border-slate-800/50"
                         >
                             <Shield className="h-4 w-4" />
-                            <span>Quản trị hệ thống</span>
+                            <span>Quản lý tài liệu</span>
+                        </button>
+                    )}
+                    {/* User Management: Admin only */}
+                    {user?.is_superuser && (
+                        <button
+                            onClick={() => navigate('/admin/users')}
+                            className="flex w-full items-center gap-3 px-4 py-3 text-sm text-purple-400 hover:bg-purple-500/10 transition-colors border-b border-slate-800/50"
+                        >
+                            <Shield className="h-4 w-4" />
+                            <span>Quản lý người dùng</span>
                         </button>
                     )}
                     <button

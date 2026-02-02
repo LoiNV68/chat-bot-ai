@@ -21,7 +21,7 @@ async def upload_document(
     expiry_date: datetime = Form(None),
     target_id: str = Form(None),
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(deps.get_current_user),
+    current_user: User = Depends(deps.get_current_content_manager),  # Admin or Lecturer
 ) -> Any:
     """
     Upload a document (PDF/Excel)
@@ -77,7 +77,7 @@ async def list_documents(
 async def delete_document(
     doc_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(deps.get_current_user),
+    current_user: User = Depends(deps.get_current_content_manager),  # Admin or Lecturer
 ) -> Any:
     """
     Soft delete a document.
@@ -94,7 +94,7 @@ async def delete_document(
 async def restore_document(
     doc_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(deps.get_current_user),
+    current_user: User = Depends(deps.get_current_content_manager),  # Admin or Lecturer
 ) -> Any:
     """
     Restore a soft-deleted document.
@@ -112,7 +112,7 @@ async def list_trash(
     db: AsyncSession = Depends(get_db),
     skip: int = 0,
     limit: int = 100,
-    current_user: User = Depends(deps.get_current_user),
+    current_user: User = Depends(deps.get_current_content_manager),  # Admin or Lecturer
 ) -> Any:
     """
     Retrieve deleted documents.

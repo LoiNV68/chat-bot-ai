@@ -22,8 +22,8 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ requireAdmin = false })
         return <Navigate to="/login" replace />;
     }
 
-    if (requireAdmin && !user?.is_superuser) {
-        // Redirect to chat if not admin, or a unauthorized page
+    if (requireAdmin && !user?.is_superuser && user?.role !== 'admin' && user?.role !== 'lecturer') {
+        // Redirect to chat if not admin or lecturer
         return <Navigate to="/chat" replace />;
     }
 

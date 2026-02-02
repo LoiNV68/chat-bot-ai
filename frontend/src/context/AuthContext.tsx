@@ -1,5 +1,7 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import axios from 'axios';
+
+type UserRole = 'admin' | 'lecturer' | 'user';
 
 interface User {
     id: number;
@@ -7,6 +9,7 @@ interface User {
     full_name: string;
     is_active: boolean;
     is_superuser: boolean;
+    role?: UserRole;
 }
 
 interface AuthContextType {
