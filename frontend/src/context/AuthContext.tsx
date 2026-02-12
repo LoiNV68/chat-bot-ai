@@ -1,5 +1,6 @@
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, ReactNode, useMemo } from 'react';
 import axios from 'axios';
+import { API_ENDPOINTS } from '@/config/api';
 
 type UserRole = 'admin' | 'lecturer' | 'user';
 
@@ -33,25 +34,25 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         const initAuth = async () => {
             if (token) {
                 try {
-                    // Verify token and get user info
-                    // Assuming we have an endpoint /api/v1/auth/me
-                    const response = await axios.get('http://localhost:8000/api/v1/auth/me', {
+                    // Xác thực token và lấy thông tin người dùng
+                    // Giả sử chúng ta có endpoint /api/v1/auth/me
+                    const response = await axios.get(API_ENDPOINTS.AUTH.ME, {
                         headers: { Authorization: `Bearer ${token}` }
                     });
                     setUser(response.data);
                 } catch (error) {
-                    // If 401/403, try refreshing
+                    // Nếu 401/403, thử refresh token
                     try {
                         if (refreshToken) {
-                           const refreshResponse = await axios.post('http://localhost:8000/api/v1/auth/refresh', null, {
+                           const refreshResponse = await axios.post(API_ENDPOINTS.AUTH.REFRESH, null, {
                                params: { refresh_token: refreshToken }
                            });
                            const newAccessToken = refreshResponse.data.access_token;
                            const newRefreshToken = refreshResponse.data.refresh_token;
 
                            login(newAccessToken, newRefreshToken);
-                           // Retry fetching user is handled by state change, but to be safe/fast:
-                           // setUser(await fetchUser(newAccessToken)); // Optional
+                           // Lấy lại user được xử lý bởi state change, nhưng để an toàn/nhanh:
+                           // setUser(await fetchUser(newAccessToken)); // Tùy chọn
                            return; 
                         }
                     } catch (refreshError) {
@@ -73,7 +74,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
                     try {
                         const storedRefreshToken = localStorage.getItem('refresh_token');
                         if (storedRefreshToken) {
-                            const response = await axios.post('http://localhost:8000/api/v1/auth/refresh', null, {
+                            const response = await axios.post(API_ENDPOINTS.AUTH.REFRESH, null, {
                                 params: { refresh_token: storedRefreshToken }
                             });
                             
@@ -115,15 +116,19 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         localStorage.removeItem('refresh_token');
     };
 
+    // Sử dụng useMemo để tránh tạo object mới mỗi render
+    const contextValue = useMemo(() => ({
+        user,
+        token,
+        login,
+        logout,
+        isLoading,
+        isAuthenticated: !!user
+    }), [user, token, isLoading]);
+
     return (
-        <AuthContext.Provider value={{
-            user,
-            token,
-            login,
-            logout,
-            isLoading,
-            isAuthenticated: !!user
-        }}>
+        <AuthContext.Provider value={contextValue}>
+
             {children}
         </AuthContext.Provider>
     );
@@ -132,7 +137,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 export const useAuth = () => {
     const context = useContext(AuthContext);
     if (context === undefined) {
-        throw new Error('useAuth must be used within an AuthProvider');
+        throw new Error('useAuth phải được sử dụng trong AuthProvider');
     }
     return context;
 };

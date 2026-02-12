@@ -4,6 +4,7 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Atom, Lock, User, Cpu, Disc, Eye, EyeOff } from 'lucide-react';
 import axios from 'axios';
+import { API_ENDPOINTS } from '@/config/api';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 
@@ -17,7 +18,7 @@ const Login = () => {
     const navigate = useNavigate();
     const { login, isAuthenticated, user } = useAuth();
 
-    // Redirect if already logged in
+    // Chuyển hướng nếu đã đăng nhập
     useEffect(() => {
         if (isAuthenticated && user) {
             if (user.is_superuser) {
@@ -38,13 +39,13 @@ const Login = () => {
             formData.append('username', username);
             formData.append('password', password);
 
-            const response = await axios.post('http://localhost:8000/api/v1/auth/login', formData, {
+            const response = await axios.post(API_ENDPOINTS.AUTH.LOGIN, formData, {
                 headers: { 'Content-Type': 'multipart/form-data' }
             });
 
             const { access_token, refresh_token } = response.data;
             await login(access_token, refresh_token);
-            // Redirection handled by useEffect
+            // Chuyển hướng được xử lý bởi useEffect
             
         } catch (err: any) {
             console.error(err);
@@ -57,7 +58,7 @@ const Login = () => {
                 } else if (Array.isArray(detail)) {
                     const firstError = detail[0];
                     if (firstError?.msg) {
-                        // Map common Pydantic errors
+                        // Map các lỗi Pydantic thông dụng
                         const msg = firstError.msg.toLowerCase();
                         if (msg.includes('field required')) message = 'Vui lòng điền đầy đủ thông tin';
                         else if (msg.includes('value is not a valid email')) message = 'Email không đúng định dạng';
@@ -75,7 +76,7 @@ const Login = () => {
 
     return (
         <div className="relative flex min-h-screen items-center justify-center bg-slate-950 overflow-hidden font-sans selection:bg-cyan-500/30">
-            {/* Background Effects */}
+            {/* Hiệu ứng nền */}
             <div className="absolute inset-0 z-0">
                 <div className="absolute top-[-20%] left-[-10%] h-[500px] w-[500px] rounded-full bg-cyan-500/20 blur-[120px] animate-pulse" />
                 <div className="absolute bottom-[-20%] right-[-10%] h-[500px] w-[500px] rounded-full bg-blue-600/20 blur-[120px] animate-pulse delay-1000" />
@@ -83,7 +84,7 @@ const Login = () => {
             </div>
 
             <Card className="z-10 w-full max-w-md border-slate-800 bg-slate-900/60 backdrop-blur-xl shadow-2xl relative overflow-hidden group">
-                {/* Top Border Gradient */}
+                {/* Đường gradient viền trên */}
                 <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-cyan-500 to-transparent opacity-50 group-hover:opacity-100 transition-opacity duration-500" />
                 
                 <CardHeader className="space-y-3 pb-6 text-center">

@@ -42,18 +42,18 @@ const RenameModal: React.FC<RenameModalProps> = ({
 
     return (
         <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
-            {/* Backdrop */}
+            {/* Nền mờ */}
             <div 
                 className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-300" 
                 onClick={onCancel}
             />
 
-            {/* Modal Content */}
+            {/* Nội dung Modal */}
             <form 
                 onSubmit={handleSubmit}
                 className="relative z-10 w-full max-w-md overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/90 shadow-2xl animate-in zoom-in-95 duration-200"
             >
-                 {/* Top Decor Line */}
+                 {/* Đường viền trang trí phía trên */}
                  <div className="h-1 w-full bg-cyan-600" />
 
                  <div className="p-6">

@@ -12,6 +12,7 @@ interface ConfirmModalProps {
     onConfirm: () => void;
     onCancel: () => void;
     type?: 'danger' | 'info' | 'warning';
+    showCancel?: boolean;
 }
 
 const ConfirmModal: React.FC<ConfirmModalProps> = ({
@@ -22,7 +23,8 @@ const ConfirmModal: React.FC<ConfirmModalProps> = ({
     cancelText = 'Hủy',
     onConfirm,
     onCancel,
-    type = 'danger'
+    type = 'danger',
+    showCancel = true
 }) => {
     if (!isOpen) return null;
 
@@ -48,15 +50,15 @@ const ConfirmModal: React.FC<ConfirmModalProps> = ({
 
     return (
         <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
-            {/* Backdrop */}
+            {/* Nền mờ */}
             <div 
                 className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-300" 
                 onClick={onCancel}
             />
 
-            {/* Modal Content */}
+            {/* Nội dung Modal */}
             <div className="relative z-10 w-full max-w-md overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/90 shadow-2xl animate-in zoom-in-95 duration-200">
-                 {/* Top Decor Line */}
+                 {/* Đường viền trang trí phía trên */}
                  <div className={cn(
                      "h-1 w-full",
                      type === 'danger' ? "bg-red-600" : type === 'warning' ? "bg-yellow-600" : "bg-cyan-600"
@@ -87,17 +89,19 @@ const ConfirmModal: React.FC<ConfirmModalProps> = ({
                     </div>
 
                     <div className="mt-8 flex flex-col-reverse sm:flex-row sm:justify-end gap-3">
-                        <Button 
-                            variant="ghost" 
-                            onClick={onCancel}
-                            className="w-full sm:w-auto text-slate-400 hover:text-white hover:bg-slate-800 transition-all font-medium py-2.5"
-                        >
-                            {cancelText}
-                        </Button>
+                        {showCancel && (
+                            <Button 
+                                variant="ghost" 
+                                onClick={onCancel}
+                                className="w-full sm:w-auto text-slate-400 hover:text-white hover:bg-slate-800 transition-all font-medium py-2.5"
+                            >
+                                {cancelText}
+                            </Button>
+                        )}
                         <Button 
                             onClick={() => {
                                 onConfirm();
-                                onCancel();
+                                if (!showCancel) onCancel(); // Auto close if alert mode
                             }}
                             className={cn(
                                 "w-full sm:w-auto font-bold py-2.5 px-6 transition-all",

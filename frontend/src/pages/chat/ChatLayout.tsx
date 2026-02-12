@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import axios from 'axios';
+import { API_ENDPOINTS } from '@/config/api';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useAuth } from '@/context/AuthContext';
@@ -35,6 +36,7 @@ interface ChatMessage {
     role: string;
     content: string;
     sources?: SourceDocument[];
+    has_related_docs?: boolean;
 }
 
 interface SidebarContentProps {
@@ -256,7 +258,7 @@ const ChatLayout = () => {
     const fetchSessions = async () => {
         try {
             const token = localStorage.getItem('token');
-            const response = await axios.get('http://localhost:8000/api/v1/chat/sessions', {
+            const response = await axios.get(API_ENDPOINTS.CHAT.SESSIONS, {
                 headers: { Authorization: `Bearer ${token}` }
             });
             setSessions(response.data);
@@ -269,7 +271,7 @@ const ChatLayout = () => {
         try {
             setCurrentSessionId(sessionId);
             const token = localStorage.getItem('token');
-            const response = await axios.get(`http://localhost:8000/api/v1/chat/sessions/${sessionId}/messages`, {
+            const response = await axios.get(API_ENDPOINTS.CHAT.MESSAGES(sessionId), {
                 headers: { Authorization: `Bearer ${token}` }
             });
             setMessages(response.data);
@@ -297,7 +299,7 @@ const ChatLayout = () => {
         try {
             const token = localStorage.getItem('token');
             const response = await axios.post(
-                'http://localhost:8000/api/v1/chat/completion',
+                API_ENDPOINTS.CHAT.COMPLETION,
                 {
                     query: inputValue,
                     session_id: currentSessionId,
@@ -314,7 +316,8 @@ const ChatLayout = () => {
             setMessages(prev => [...prev, { 
                 role: 'ai', 
                 content: response.data.answer,
-                sources: response.data.sources || []
+                sources: response.data.sources || [],
+                has_related_docs: response.data.has_related_docs || false
             }]);
             if (!currentSessionId) fetchSessions();
 
@@ -340,7 +343,7 @@ const ChatLayout = () => {
         e.stopPropagation();
         try {
             const token = localStorage.getItem('token');
-            await axios.patch(`http://localhost:8000/api/v1/chat/sessions/${session.id}`, 
+            await axios.patch(API_ENDPOINTS.CHAT.SESSION(session.id), 
                 { is_pinned: !session.is_pinned },
                 { headers: { Authorization: `Bearer ${token}` } }
             );
@@ -365,13 +368,16 @@ const ChatLayout = () => {
         if (!selectedSessionId) return;
         try {
             const token = localStorage.getItem('token');
-            await axios.delete(`http://localhost:8000/api/v1/chat/sessions/${selectedSessionId}`, {
+            await axios.delete(API_ENDPOINTS.CHAT.SESSION(selectedSessionId), {
                 headers: { Authorization: `Bearer ${token}` }
             });
             if (currentSessionId === selectedSessionId) handleNewChat();
             fetchSessions();
         } catch (error) {
             console.error('Failed to delete session:', error);
+        } finally {
+            setIsDeleteModalOpen(false);
+            setSelectedSessionId(null);
         }
     };
 
@@ -389,7 +395,7 @@ const ChatLayout = () => {
         if (!selectedSessionId) return;
         try {
             const token = localStorage.getItem('token');
-            await axios.patch(`http://localhost:8000/api/v1/chat/sessions/${selectedSessionId}`, 
+            await axios.patch(API_ENDPOINTS.CHAT.SESSION(selectedSessionId), 
                 { title: newTitle },
                 { headers: { Authorization: `Bearer ${token}` } }
             );
@@ -544,7 +550,7 @@ const ChatLayout = () => {
                                             {msg.sources.map((source, idx) => (
                                                 <a
                                                     key={idx}
-                                                    href={`http://localhost:8000/api/v1/documents/${source.doc_id}/content`}
+                                                    href={API_ENDPOINTS.DOCUMENTS.CONTENT(source.doc_id)}
                                                     target="_blank"
                                                     rel="noopener noreferrer"
                                                     className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-slate-800/50 hover:bg-slate-700/50 border border-slate-700/30 hover:border-cyan-500/30 transition-all group text-xs"
@@ -557,6 +563,22 @@ const ChatLayout = () => {
                                                 </a>
                                             ))}
                                         </div>
+                                    </div>
+                                )}
+
+                                {/* Document Suggestion - Only show on last AI message with related docs */}
+                                {msg.role === 'ai' && msg.has_related_docs && (!msg.sources || msg.sources.length === 0) && index === messages.length - 1 && (
+                                    <div className="mt-3 pt-3 border-t border-slate-700/30">
+                                        <button
+                                            onClick={() => {
+                                                setInputValue('Cho tôi xem tài liệu tham khảo');
+                                                setTimeout(() => handleSendMessage(), 100);
+                                            }}
+                                            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 hover:border-cyan-400 transition-all text-xs text-cyan-400 hover:text-cyan-300"
+                                        >
+                                            <FileText className="h-3.5 w-3.5" />
+                                            <span>Bạn có muốn xem tài liệu tham khảo không?</span>
+                                        </button>
                                     </div>
                                 )}
                             </div>

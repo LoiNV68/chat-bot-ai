@@ -23,7 +23,7 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ requireAdmin = false })
     }
 
     if (requireAdmin && !user?.is_superuser && user?.role !== 'admin' && user?.role !== 'lecturer') {
-        // Redirect to chat if not admin or lecturer
+        // Chuyển hướng đến chat nếu không phải admin hoặc giảng viên
         return <Navigate to="/chat" replace />;
     }
 

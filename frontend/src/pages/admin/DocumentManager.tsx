@@ -4,6 +4,7 @@ import { Input } from '@/components/ui/input';
 import { FileText, Upload, Trash2, Shield, Activity, Search, Filter, ArrowLeft, Clock, User, RotateCcw, Eye, Download } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import axios from 'axios';
+import { API_ENDPOINTS } from '@/config/api';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import { useState, useEffect, useRef } from 'react';
@@ -34,17 +35,43 @@ const DocumentManager = () => {
     const [selectedDocId, setSelectedDocId] = useState<number | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
+    const [alertModal, setAlertModal] = useState<{
+        isOpen: boolean;
+        title: string;
+        message: string;
+        type: 'danger' | 'info' | 'warning';
+    }>({
+        isOpen: false,
+        title: '',
+        message: '',
+        type: 'info'
+    });
+
+    // Lấy tài liệu khi viewMode thay đổi
     useEffect(() => {
         fetchDocuments();
     }, [viewMode]);
+
+    // Tự động poll khi có tài liệu đang được xử lý
+    useEffect(() => {
+        const hasProcessingDocs = documents.some(doc => !doc.is_processed);
+        
+        if (hasProcessingDocs && viewMode === 'active') {
+            const pollInterval = setInterval(() => {
+                fetchDocuments();
+            }, 10000); // Poll mỗi 10 giây
+            
+            return () => clearInterval(pollInterval);
+        }
+    }, [documents, viewMode]);
 
     const fetchDocuments = async () => {
         setIsDocsLoading(true);
         try {
             const token = localStorage.getItem('token');
             const endpoint = viewMode === 'active' 
-                ? 'http://localhost:8000/api/v1/documents/' 
-                : 'http://localhost:8000/api/v1/documents/trash';
+                ? API_ENDPOINTS.DOCUMENTS.BASE 
+                : API_ENDPOINTS.DOCUMENTS.TRASH;
             
             const response = await axios.get(endpoint, {
                 headers: { Authorization: `Bearer ${token}` }
@@ -66,7 +93,7 @@ const DocumentManager = () => {
             formData.append('file', file);
             formData.append('scope', 'public');
 
-            await axios.post('http://localhost:8000/api/v1/documents/upload', formData, {
+            await axios.post(API_ENDPOINTS.DOCUMENTS.UPLOAD, formData, {
                 headers: { 
                     Authorization: `Bearer ${token}`,
                     'Content-Type': 'multipart/form-data'
@@ -78,8 +105,24 @@ const DocumentManager = () => {
                 fileInputRef.current.value = '';
             }
             if (viewMode === 'active') fetchDocuments();
-        } catch (error) {
-            console.error('Upload failed', error);
+        } catch (error: any) {
+            if (error?.response?.status === 409) {
+                setAlertModal({
+                    isOpen: true,
+                    title: 'Thông báo',
+                    message: error.response.data.detail || 'Đang có tài liệu đang xử lý. Vui lòng đợi.',
+                    type: 'warning'
+                });
+                fetchDocuments(); // Refresh lại danh sách
+            } else {
+                console.error('Upload failed', error);
+                setAlertModal({
+                    isOpen: true,
+                    title: 'Lỗi tải lên',
+                    message: 'Tải lên thất bại. Vui lòng thử lại.',
+                    type: 'danger'
+                });
+            }
         } finally {
             setUploading(false);
         }
@@ -94,7 +137,7 @@ const DocumentManager = () => {
         if (!selectedDocId) return;
         try {
             const token = localStorage.getItem('token');
-            await axios.delete(`http://localhost:8000/api/v1/documents/${selectedDocId}`, {
+            await axios.delete(API_ENDPOINTS.DOCUMENTS.BY_ID(selectedDocId), {
                 headers: { Authorization: `Bearer ${token}` }
             });
             fetchDocuments();
@@ -106,7 +149,7 @@ const DocumentManager = () => {
     const handleRestore = async (id: number) => {
         try {
             const token = localStorage.getItem('token');
-            await axios.post(`http://localhost:8000/api/v1/documents/${id}/restore`, null, {
+            await axios.post(API_ENDPOINTS.DOCUMENTS.RESTORE(id), null, {
                 headers: { Authorization: `Bearer ${token}` }
             });
             fetchDocuments();
@@ -120,7 +163,7 @@ const DocumentManager = () => {
             const token = localStorage.getItem('token');
             const isPdf = filename.toLowerCase().endsWith('.pdf');
             
-            const response = await axios.get(`http://localhost:8000/api/v1/documents/${id}/content`, {
+            const response = await axios.get(API_ENDPOINTS.DOCUMENTS.CONTENT(id), {
                 headers: { Authorization: `Bearer ${token}` },
                 responseType: 'blob'
             });
@@ -151,7 +194,7 @@ const DocumentManager = () => {
 
     return (
         <div className="relative min-h-screen overflow-hidden bg-slate-950 font-sans text-slate-100 selection:bg-cyan-500/30">
-            {/* Background Effects */}
+            {/* Hiệu ứng nền */}
             <div className="absolute inset-0 z-0 pointer-events-none">
                 <div className="absolute top-[-20%] left-[-10%] h-[500px] w-[500px] rounded-full bg-cyan-500/10 blur-[120px] animate-pulse" />
                 <div className="absolute bottom-[-20%] right-[-10%] h-[500px] w-[500px] rounded-full bg-blue-600/10 blur-[120px] animate-pulse delay-1000" />
@@ -160,7 +203,7 @@ const DocumentManager = () => {
 
             <div className="relative z-10 container mx-auto p-4 md:p-8 space-y-8">
                 
-                {/* Header Section */}
+                {/* Phần Header */}
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                     <div className="space-y-1">
                         <div className="flex items-center gap-3">
@@ -202,7 +245,10 @@ const DocumentManager = () => {
                 
                 <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-300">
                     {viewMode === 'active' && (
-                        <Card className="border-cyan-500/20 bg-slate-900/60 backdrop-blur-xl shadow-lg relative overflow-hidden group">
+                        <Card className={cn(
+                            "border-cyan-500/20 bg-slate-900/60 backdrop-blur-xl shadow-lg relative overflow-hidden group",
+                            documents.some(doc => !doc.is_processed) && "opacity-60"
+                        )}>
                             <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-cyan-500/50 to-transparent" />
                             <CardHeader>
                                 <CardTitle className="text-xl text-slate-100 flex items-center gap-2">
@@ -210,35 +256,49 @@ const DocumentManager = () => {
                                    Tải lên tài liệu mới
                                 </CardTitle>
                             </CardHeader>
-                            <CardContent className="flex flex-col md:flex-row gap-4 items-center">
-                                <div className="relative w-full">
-                                    <input 
-                                        ref={fileInputRef}
-                                        type="file" 
-                                        onChange={(e) => setFile(e.target.files?.[0] || null)}
-                                        className="hidden" 
-                                        id="file-upload"
-                                    />
-                                    <label 
-                                        htmlFor="file-upload"
-                                        className="flex items-center w-full px-4 py-2 bg-slate-950/50 border border-slate-700 rounded-md text-slate-300 cursor-pointer hover:bg-slate-900 transition-colors group/input"
+                            <CardContent className="space-y-3">
+                                {documents.some(doc => !doc.is_processed) && (
+                                    <div className="flex items-center gap-2 px-4 py-2.5 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-300 text-sm">
+                                        <Activity className="h-4 w-4 animate-pulse flex-shrink-0" />
+                                        <span>Đang có tài liệu đang xử lý. Vui lòng đợi hoàn tất trước khi tải lên tài liệu mới.</span>
+                                    </div>
+                                )}
+                                <div className="flex flex-col md:flex-row gap-4 items-center">
+                                    <div className="relative w-full">
+                                        <input 
+                                            ref={fileInputRef}
+                                            type="file" 
+                                            onChange={(e) => setFile(e.target.files?.[0] || null)}
+                                            className="hidden" 
+                                            id="file-upload"
+                                            disabled={documents.some(doc => !doc.is_processed)}
+                                        />
+                                        <label 
+                                            htmlFor="file-upload"
+                                            className={cn(
+                                                "flex items-center w-full px-4 py-2 bg-slate-950/50 border border-slate-700 rounded-md text-slate-300 transition-colors group/input",
+                                                documents.some(doc => !doc.is_processed) 
+                                                    ? "cursor-not-allowed opacity-50" 
+                                                    : "cursor-pointer hover:bg-slate-900"
+                                            )}
+                                        >
+                                            <span className="bg-slate-800 text-cyan-400 px-3 py-1 rounded text-sm mr-3 border border-slate-700 group-hover/input:bg-slate-700 transition-colors">
+                                                Chọn tệp...
+                                            </span>
+                                            <span className="text-sm text-slate-400 truncate">
+                                                {file ? file.name : 'Chưa chọn tệp nào'}
+                                            </span>
+                                        </label>
+                                    </div>
+                                    <Button 
+                                        onClick={handleUpload}
+                                        disabled={uploading || !file || documents.some(doc => !doc.is_processed)}
+                                        className="w-full md:w-auto bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-medium shadow-[0_0_15px_-3px_rgba(6,182,212,0.5)] border-0 disabled:opacity-50 disabled:cursor-not-allowed"
                                     >
-                                        <span className="bg-slate-800 text-cyan-400 px-3 py-1 rounded text-sm mr-3 border border-slate-700 group-hover/input:bg-slate-700 transition-colors">
-                                            Chọn tệp...
-                                        </span>
-                                        <span className="text-sm text-slate-400 truncate">
-                                            {file ? file.name : 'Chưa chọn tệp nào'}
-                                        </span>
-                                    </label>
+                                        <Upload className="mr-2 h-4 w-4" /> 
+                                        {uploading ? 'Đang tải...' : 'Tải lên'}
+                                    </Button>
                                 </div>
-                                <Button 
-                                    onClick={handleUpload}
-                                    disabled={uploading || !file}
-                                    className="w-full md:w-auto bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-medium shadow-[0_0_15px_-3px_rgba(6,182,212,0.5)] border-0"
-                                >
-                                    <Upload className="mr-2 h-4 w-4" /> 
-                                    {uploading ? 'Đang tải...' : 'Tải lên'}
-                                </Button>
                             </CardContent>
                         </Card>
                     )}
@@ -382,6 +442,17 @@ const DocumentManager = () => {
                 cancelText="Quay lại"
                 onConfirm={confirmDelete}
                 onCancel={() => setIsDeleteModalOpen(false)}
+            />
+
+            <ConfirmModal 
+                isOpen={alertModal.isOpen}
+                title={alertModal.title}
+                message={alertModal.message}
+                confirmText="Đóng"
+                showCancel={false}
+                type={alertModal.type}
+                onConfirm={() => setAlertModal(prev => ({ ...prev, isOpen: false }))}
+                onCancel={() => setAlertModal(prev => ({ ...prev, isOpen: false }))}
             />
         </div>
     );
