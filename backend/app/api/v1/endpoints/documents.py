@@ -5,6 +5,7 @@ from app.db.session import get_db
 from app.api import deps
 from app.schemas.doc_schema import DocUploadSchema, DocumentResponse
 from app.services.ingestion_service import IngestionService, run_background_ingestion
+from app.services.vector_store import VectorStore
 from app.models.user import User
 from app.models.document import AccessScope, Document
 from datetime import datetime
@@ -26,6 +27,21 @@ async def upload_document(
     """
     Upload a document (PDF/Excel)
     """
+    # Kiểm tra xem có tài liệu nào đang xử lý không
+    from sqlalchemy import select
+    stmt = select(Document).where(
+        Document.is_active == True,
+        Document.is_processed == False
+    )
+    result = await db.execute(stmt)
+    processing_docs = result.scalars().all()
+    
+    if processing_docs:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Đang có {len(processing_docs)} tài liệu đang xử lý. Vui lòng đợi hoàn tất trước khi tải lên tài liệu mới."
+        )
+    
     ingestion_service = IngestionService(db)
     metadata = DocUploadSchema(
         scope=scope,
@@ -86,8 +102,14 @@ async def delete_document(
     if not doc:
         raise HTTPException(status_code=404, detail="Không tìm thấy tài liệu")
     
+    # 1. Cập nhật DB
     doc.is_active = False
     await db.commit()
+    
+    # 2. Cập nhật Qdrant - đánh dấu vectors là inactive
+    vector_store = VectorStore()
+    await vector_store.set_document_active(doc_id, is_active=False)
+    
     return {"message": "Document deleted"}
 
 @router.post("/{doc_id}/restore")
@@ -103,8 +125,14 @@ async def restore_document(
     if not doc:
         raise HTTPException(status_code=404, detail="Không tìm thấy tài liệu")
     
+    # 1. Cập nhật DB
     doc.is_active = True
     await db.commit()
+    
+    # 2. Cập nhật Qdrant - đánh dấu vectors là active
+    vector_store = VectorStore()
+    await vector_store.set_document_active(doc_id, is_active=True)
+    
     return {"message": "Document restored"}
 
 @router.get("/trash", response_model=List[DocumentResponse])

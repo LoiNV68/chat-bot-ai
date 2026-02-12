@@ -17,7 +17,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 print(f"DEBUG: POSTGRES_SERVER={settings.POSTGRES_SERVER}")
 print(f"DEBUG: SQLALCHEMY_DATABASE_URI={settings.SQLALCHEMY_DATABASE_URI}")
 
-# Set all CORS enabled origins
+# C\u1ea5u h\u00ecnh t\u1ea5t c\u1ea3 c\u00e1c CORS origins \u0111\u01b0\u1ee3c cho ph\u00e9p
 if settings.BACKEND_CORS_ORIGINS:
     app.add_middleware(
         CORSMiddleware,

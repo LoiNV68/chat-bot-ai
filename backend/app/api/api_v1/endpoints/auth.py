@@ -14,12 +14,12 @@ router = APIRouter()
 def login_access_token(
     db: Session = Depends(deps.get_db), form_data: OAuth2PasswordRequestForm = Depends()
 ) -> Any:
-    # Simplified login logic
+    # Logic đăng nhập đơn giản hóa
     user = db.query(User).filter(User.username == form_data.username).first()
     if not user: # or verify password
          raise HTTPException(status_code=400, detail="Incorrect email or password")
     
-    # Create token (placeholder)
+    # Tạo token (placeholder)
     return {
         "access_token": "fake-jwt-token",
         "token_type": "bearer",

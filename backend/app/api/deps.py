@@ -43,7 +43,7 @@ async def get_current_user(
 async def get_current_active_superuser(
     current_user: User = Depends(get_current_user),
 ) -> User:
-    """Only admins can access"""
+    """Chỉ admin mới có quyền truy cập"""
     if not current_user.is_superuser and current_user.role != "admin":
         raise HTTPException(
             status_code=400, detail="Người dùng không có đủ quyền hạn"
@@ -53,7 +53,7 @@ async def get_current_active_superuser(
 async def get_current_content_manager(
     current_user: User = Depends(get_current_user),
 ) -> User:
-    """Admins and Lecturers can manage content (documents)"""
+    """Admin và Giảng viên có thể quản lý nội dung (tài liệu)"""
     allowed_roles = ["admin", "lecturer"]
     if not current_user.is_superuser and current_user.role not in allowed_roles:
         raise HTTPException(
@@ -61,6 +61,6 @@ async def get_current_content_manager(
         )
     return current_user
 
-# Aliases for convenience
+# Biệt danh để thuận tiện
 get_current_superuser = get_current_active_superuser
 get_current_lecturer = get_current_content_manager

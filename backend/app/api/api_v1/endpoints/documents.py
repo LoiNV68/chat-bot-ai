@@ -24,7 +24,7 @@ def upload_document(
     db: Session = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_active_user)
 ):
-    # 1. Save file
+    # 1. Lưu file
     file_ext = file.filename.split(".")[-1].lower()
     if file_ext not in ["pdf", "xlsx", "xls"]:
         raise HTTPException(status_code=400, detail="Unsupported file format")
@@ -33,17 +33,17 @@ def upload_document(
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
         
-    # 2. Create DB Record
+    # 2. Tạo bản ghi DB
     db_doc = Document(
         filename=file.filename,
-        effective_date=datetime.now(), # Placeholder
+        effective_date=datetime.now(), # Placeholder tạm thời
         file_hash="pending"
     )
     db.add(db_doc)
     db.commit()
     db.refresh(db_doc)
     
-    # Audit Log
+    # Ghi log kiểm toán
     AuditService.log(
         db=db,
         user_id=current_user.id,
@@ -53,7 +53,7 @@ def upload_document(
         details={"filename": file.filename}
     )
     
-    # 3. Process
+    # 3. Xử lý
     try:
         chunks = []
         if file_ext == "pdf":
@@ -61,7 +61,7 @@ def upload_document(
         elif file_ext in ["xlsx", "xls"]:
             chunks = ExcelProcessor.process(file_path)
             
-        # 4. Vector Store Upsert
+        # 4. Cập nhật Vector Store
         metadatas = [{"source_id": db_doc.id, "filename": file.filename, "text": chunk} for chunk in chunks]
         vector_store.upsert_vectors(
             texts=chunks,

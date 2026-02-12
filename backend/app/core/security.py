@@ -25,7 +25,7 @@ def create_refresh_token(
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
-        # Refresh tokens last longer, e.g., 7 days
+        # Refresh tokens tồn tại lâu hơn, ví dụ: 7 ngày
         expire = datetime.now(timezone.utc) + timedelta(days=7)
     
     to_encode = {"exp": expire, "sub": str(subject), "type": "refresh"}
@@ -34,14 +34,14 @@ def create_refresh_token(
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    # bcrypt requires bytes
+    # bcrypt yêu cầu bytes
     if isinstance(hashed_password, str):
         hashed_password = hashed_password.encode('utf-8')
     return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password)
 
 
 def get_password_hash(password: str) -> str:
-    # Generate salt and hash
+    # Tạo salt và hash
     pwd_bytes = password.encode('utf-8')
     salt = bcrypt.gensalt()
     hashed = bcrypt.hashpw(pwd_bytes, salt)
