@@ -143,6 +143,9 @@ const DocumentManager = () => {
             fetchDocuments();
         } catch (error) {
             console.error('Delete failed', error);
+        } finally {
+            setIsDeleteModalOpen(false);
+            setSelectedDocId(null);
         }
     };
 
