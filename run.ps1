@@ -1,47 +1,66 @@
-# Parameter to skip dependency installation
+# run.ps1 - Script chay APP tren Windows (Backend + Frontend)
+# Backend (Python) & Frontend (Node) chay tai day.
+# DB & AI chay tren WSL.
+
 param(
     [switch]$SkipInstall
 )
 
-# 1. Start Infrastructure
-Write-Host "Starting Docker Infrastructure..." -ForegroundColor Green
-docker compose up -d
+Write-Host "Dang khoi dong Ung dung tren Windows..." -ForegroundColor Green
 
-# 2. Backend Setup & Run
-Write-Host "Setting up Backend..." -ForegroundColor Green
+# Kiem tra Python (uu tien 'py' launcher roi den 'python')
+$PYTHON_CMD = "python"
+if (Get-Command "py" -ErrorAction SilentlyContinue) {
+    $PYTHON_CMD = "py"
+    Write-Host "[INFO] Phat hien Python Launcher ('py'). Se su dung no."
+} elseif (-not (Get-Command "python" -ErrorAction SilentlyContinue)) {
+    Write-Host "[ERROR] Khong tim thay 'python' hoac 'py'. Vui long cai dat Python!" -ForegroundColor Red
+    exit 1
+}
+
+# 1. Backend
+Write-Host "Dang thiet lap Backend..." -ForegroundColor Green
 Set-Location backend
 
-# Install requirements (skip if -SkipInstall flag is used)
+# Tao/Kiem tra venv
 if (-not $SkipInstall) {
-    Write-Host "Installing Backend dependencies..."
-    ../venv/Scripts/python.exe -m pip install -r requirements.txt
-} else {
-    Write-Host "Skipping Backend dependencies installation (-SkipInstall flag)" -ForegroundColor Yellow
+    if (-not (Test-Path "venv")) {
+        Write-Host "Dang tao venv..."
+        & $PYTHON_CMD -m venv venv
+    }
+    
+    # Kiem tra xem venv co tao thanh cong khong
+    if (-not (Test-Path "venv\Scripts\python.exe")) {
+        Write-Host "[ERROR] Khong tim thay python trong venv. Co the venv bi loi." -ForegroundColor Red
+        Write-Host "        Hay xoa thu muc 'backend/venv' va chay lai script."
+        exit 1
+    }
+
+    Write-Host "Dang cai dat thu vien..."
+    .\venv\Scripts\python.exe -m pip install -r requirements.txt
 }
 
-# Init DB (Wait for Postgres to be ready might be needed in real scenario, here we assume it's fast enough or re-run)
-Write-Host "Initializing Database..." -ForegroundColor Green
-../venv/Scripts/python.exe -m app.db.init_db
+# Init DB
+Write-Host "Dang ket noi DB (WSL)..."
+.\venv\Scripts\python.exe -m app.db.init_db
 
-# Start Backend in a new window
-Write-Host "Starting Backend Server in new window..." -ForegroundColor Cyan
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "& '..\venv\Scripts\activate'; uvicorn app.main:app --reload"
+# Chay Backend
+Write-Host "Dang khoi dong Backend..." -ForegroundColor Cyan
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "& '.\venv\Scripts\activate'; uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
-# 3. Frontend Setup & Run
-Set-Location ../frontend
-Write-Host "Setting up Frontend..." -ForegroundColor Green
+# 2. Frontend
+Set-Location ..\frontend
+Write-Host "Dang thiet lap Frontend..." -ForegroundColor Green
 
-# Install npm packages (skip if -SkipInstall flag is used)
 if (-not $SkipInstall) {
-    Write-Host "Installing Frontend dependencies..."
-    npm install
-} else {
-    Write-Host "Skipping Frontend dependencies installation (-SkipInstall flag)" -ForegroundColor Yellow
+    if (-not (Test-Path "node_modules")) {
+        Write-Host "Dang cai dat node_modules..."
+        npm install
+    }
 }
 
-# Start Frontend in a new window
-Write-Host "Starting Frontend Server in new window..." -ForegroundColor Cyan
+Write-Host "Dang khoi dong Frontend..." -ForegroundColor Cyan
 Start-Process powershell -ArgumentList "-NoExit", "-Command", "npm run dev"
 
 Set-Location ..
-Write-Host "All services startup initiated!" -ForegroundColor Green
+Write-Host "Da khoi chay xong!" -ForegroundColor Green

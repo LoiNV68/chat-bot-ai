@@ -4,13 +4,8 @@ import asyncio
 from collections import OrderedDict
 from app.core.config import settings
 
-try:
-    from langchain_ollama import OllamaLLM as Ollama
-except ImportError:
-    from langchain_community.llms import Ollama
-
-from langchain_ollama import OllamaEmbeddings
-
+# Use OpenAI compatible client for llama.cpp server
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 class LRUCache:
     """LRU Cache đơn giản với giới hạn kích thước tối đa."""
@@ -48,23 +43,23 @@ class LLMClient:
         if hasattr(self, '_initialized') and self._initialized:
             return
         
-        # Sử dụng Ollama cho Embeddings
-        self.embedding_model = OllamaEmbeddings(
-            model="nomic-embed-text",
-            base_url=settings.OLLAMA_BASE_URL,
-            num_gpu=0,      # Ép chạy hoàn toàn trên CPU theo yêu cầu
-            num_ctx=16384,   # Giới hạn context window để tiết kiệm RAM khi chạy CPU
-            keep_alive=900  # Giữ model trong memory 5 phút (300 giây) - phải là int
+        # Sử dụng OpenAIEmbeddings - có thể chạy trên server riêng (Windows)
+        # Tách riêng khỏi LLM server (WSL) bằng EMBEDDING_BASE_URL
+        self.embedding_model = OpenAIEmbeddings(
+            model=settings.EMBEDDING_MODEL,
+            openai_api_base=settings.EMBEDDING_BASE_URL,
+            openai_api_key="dummy", # llama.cpp doesn't require a real key
+            check_embedding_ctx_length=False # Avoid checks that might fail with local servers
         )
         
-        # Chat Generation dùng Ollama - keep_alive=30m để giữ model trong memory
-        self.generation_model = Ollama(
-            base_url=settings.OLLAMA_BASE_URL,
+        # Chat Generation dùng ChatOpenAI kết nối tới llama.cpp server
+        self.generation_model = ChatOpenAI(
             model=settings.LLM_MODEL,
+            openai_api_base=settings.OLLAMA_BASE_URL,
+            openai_api_key="dummy",
             temperature=0.7,
-            keep_alive=1800, # Giữ model được tải trong 30 phút (1800 giây) - phải là int
-            num_ctx=16384,   # Tăng context window cho generation model
-            # num_gpu=-1 # Mặc định Ollama tự tối ưu GPU
+            max_tokens=None, # Let server decide or infinite
+            timeout=1800 # 30 minutes timeout
         )
         
         # LRU Cache cho embeddings (tối đa 1000 entries) cho các truy vấn thường dùng
@@ -141,7 +136,14 @@ class LLMClient:
     
     async def generate_response(self, prompt: str):
         """Tạo phản hồi với pre-compiled regex cleaning."""
-        response = await asyncio.to_thread(self.generation_model.invoke, prompt)
+        try:
+             # ChatOpenAI invoke returns an AIMessage, we need .content
+            response_msg = await asyncio.to_thread(self.generation_model.invoke, prompt)
+            response = response_msg.content
+        except Exception as e:
+            print(f"Error generating response: {e}")
+            return "Xin lỗi, tôi đang gặp sự cố kết nối với AI Server."
+
         
         # Strip whitespace trước khi clean
         cleaned = response.strip()
@@ -202,9 +204,13 @@ Câu hỏi hiện tại: {query}
 
 Câu hỏi hoàn chỉnh:"""
         # Sử dụng async invoke để không block event loop
-        result = await asyncio.to_thread(self.generation_model.invoke, prompt)
+        try:
+            result_msg = await asyncio.to_thread(self.generation_model.invoke, prompt)
+            result = result_msg.content
+        except Exception as e:
+            print(f"Error rewriting query: {e}")
+            return query
+
         # Sử dụng pre-compiled pattern
         cleaned = self._cyrillic_cjk_pattern.sub('', result)
         return cleaned.strip() if cleaned.strip() else query
-
-

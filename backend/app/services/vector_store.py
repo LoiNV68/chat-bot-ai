@@ -53,30 +53,55 @@ class VectorStore:
             return
         try:
             await self.client.get_collection(self.collection_name)
-            VectorStore._collection_checked = True
         except Exception:
-            await self.client.create_collection(
-                collection_name=self.collection_name,
-                vectors_config=models.VectorParams(size=768, distance=models.Distance.COSINE),
-            )
-            VectorStore._collection_checked = True
-        
-        # Tạo full-text index cho keyword search (idempotent)
-        try:
-            await self.client.create_payload_index(
-                collection_name=self.collection_name,
-                field_name="content",
-                field_schema=models.TextIndexParams(
-                    type="text",
-                    tokenizer=models.TokenizerType.WORD,
-                    min_token_len=2,
-                    max_token_len=20,
-                    lowercase=True,
+            try:
+                await self.client.create_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=models.VectorParams(size=768, distance=models.Distance.COSINE),
                 )
-            )
-            print("[DEBUG] Full-text index created on 'content' field")
-        except Exception:
-            pass  # Index đã tồn tại
+            except Exception:
+                pass  # Collection đã tồn tại (409 Conflict)
+        
+        VectorStore._collection_checked = True
+        
+        # Tạo payload indexes (idempotent - bỏ qua nếu đã tồn tại)
+        index_configs = [
+            # Full-text index cho keyword search
+            ("content", models.TextIndexParams(
+                type="text",
+                tokenizer=models.TokenizerType.WORD,
+                min_token_len=2,
+                max_token_len=20,
+                lowercase=True,
+            )),
+            # Full-text index cho title search
+            ("title", models.TextIndexParams(
+                type="text",
+                tokenizer=models.TokenizerType.WORD,
+                min_token_len=2,
+                max_token_len=30,
+                lowercase=True,
+            )),
+            # Keyword indexes cho exact match
+            ("doc_number", models.PayloadSchemaType.KEYWORD),
+            ("issuer", models.PayloadSchemaType.KEYWORD),
+            ("doc_type", models.PayloadSchemaType.KEYWORD),
+            ("keywords", models.PayloadSchemaType.KEYWORD),
+            ("topic", models.PayloadSchemaType.KEYWORD),
+            ("date", models.PayloadSchemaType.KEYWORD),
+        ]
+        
+        for field_name, schema in index_configs:
+            try:
+                await self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name=field_name,
+                    field_schema=schema,
+                )
+            except Exception:
+                pass  # Index đã tồn tại
+        
+        print("[DEBUG] Payload indexes ensured for: content, title, doc_number, issuer, doc_type, keywords, topic, date")
 
     async def upsert_vectors(self, texts: List[str], metadatas: List[Dict[str, Any]], ids: List[str] = None):
         if not texts:

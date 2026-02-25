@@ -4,7 +4,24 @@ from collections import defaultdict
 from app.services.llm_client import LLMClient
 from app.services.vector_store import VectorStore
 from app.models.user import User
-from app.services.improved_chat_engine import ExcelQueryProcessor
+from pyvi import ViTokenizer
+
+class ExcelQueryProcessor:
+    """
+    Basic implementation of ExcelQueryProcessor to replace the missing module.
+    Analyzes queries to optimize search strategy.
+    """
+    def analyze_query(self, query: str) -> Dict[str, Any]:
+        # Default fallback analysis
+        return {
+            'query_type': 'general',
+            'search_strategy': 'hybrid', # Default to hybrid search
+            'preferred_chunk_types': [],
+            'keywords': [],
+            'time_filter': None,
+            'column_mentions': []
+        }
+
 
 class ChatEngine:
     """Singleton ChatEngine - tái sử dụng LLMClient và VectorStore."""
@@ -46,7 +63,7 @@ class ChatEngine:
                 }
             else:
                 return {
-                    'answer': "Xin lỗi, hiện tại không có tài liệu nào liên quan đến câu hỏi trước đó.",
+                    'answer': "Mình chưa có tài liệu tham khảo nào từ câu hỏi trước đó. Bạn thử hỏi một nội dung cụ thể để mình tìm kiếm nhé! 😊",
                     'sources': [],
                     'has_related_docs': False
                 }
@@ -105,23 +122,30 @@ class ChatEngine:
                 'match': {'value': query_analysis['time_filter']}
             })
         
-        # Bước 7: Search dựa trên strategy từ query analysis
+        # Bước 7: Tách từ tiếng Việt cho query (BẮT BUỘC)
+        # Vì documents đã được tokenize bằng ViTokenizer khi ingestion,
+        # query cũng phải tokenize để vector khoảng cách chính xác.
+        tokenized_query = ViTokenizer.tokenize(refined_query)
+        tokenized_kw = [ViTokenizer.tokenize(kw) for kw in all_kw] if all_kw else []
+        print(f"[DEBUG] Tokenized query: {tokenized_query[:100]}")
+        
+        # Bước 8: Search dựa trên strategy từ query analysis
         search_strategy = query_analysis['search_strategy']
         
-        if search_strategy == 'keyword' and all_kw:
+        if search_strategy == 'keyword' and tokenized_kw:
             search_results = await self.vector_store.keyword_search(
-                keywords=all_kw,
+                keywords=tokenized_kw,
                 limit=40,
                 filter_dict=enhanced_filters
             )
-        elif search_strategy == 'semantic' or not all_kw:
+        elif search_strategy == 'semantic' or not tokenized_kw:
             search_results = await self.vector_store.search(
-                refined_query, limit=40, filter_dict=enhanced_filters
+                tokenized_query, limit=40, filter_dict=enhanced_filters
             )
         else:  # hybrid (default)
             search_results = await self.vector_store.hybrid_search(
-                query=refined_query, 
-                keywords=all_kw, 
+                query=tokenized_query, 
+                keywords=tokenized_kw, 
                 limit=40, 
                 filter_dict=enhanced_filters
             )
@@ -142,6 +166,29 @@ class ChatEngine:
         valid_hits = self._rerank_by_query_type(valid_hits, query_analysis)
         
         print(f"[DEBUG] After threshold ({THRESHOLD}) + re-rank: {len(valid_hits)} valid hits")
+        
+        # --- Nếu không tìm thấy tài liệu nào phù hợp, để LLM trả lời linh hoạt ---
+        if not valid_hits:
+            no_doc_prompt = f"""Bạn là Chat Bot AI của FBU (Trường Đại học Tài chính - Ngân hàng Hà Nội).
+
+Người dùng hỏi: {refined_query}
+
+Bạn KHÔNG tìm thấy thông tin nào liên quan trong cơ sở dữ liệu tài liệu.
+
+QUY TẮC:
+1. Trả lời lịch sự, tự nhiên, thân thiện bằng tiếng Việt.
+2. Thừa nhận rằng bạn chưa có dữ liệu về nội dung này.
+3. Gợi ý người dùng thử hỏi cách khác, hoặc liên hệ phòng ban phù hợp nếu cần.
+4. KHÔNG bịa đặt thông tin.
+5. Giữ câu trả lời NGẮN GỌN (2-3 câu).
+
+Trả lời:"""
+            response = await self.llm.generate_response(no_doc_prompt)
+            return {
+                'answer': response,
+                'sources': [],
+                'has_related_docs': False
+            }
         
         # Trích xuất nội dung với context building tối ưu (grouped by source + priority)
         context_text = self._build_optimized_context(valid_hits)
@@ -410,7 +457,7 @@ Trả lời:"""
     def _build_optimized_context(self, valid_hits: List) -> str:
         """
         Build context grouped by source với priority order.
-        Thứ tự ưu tiên: overview → column_stats → grouped_rows → single_row → khác
+        Hiển thị metadata cấu trúc (title, doc_number, date, issuer) trong header.
         """
         # Group results by source and chunk_type
         grouped = defaultdict(lambda: defaultdict(list))
@@ -422,12 +469,41 @@ Trả lời:"""
         
         context_parts = []
         priority_order = ['overview', 'column_stats', 'grouped_rows', 'single_row',
-                          'excel_summary', 'excel_group', 'excel_row',
-                          'text', 'table', 'ocr_text', 'unknown']
+                          'excel_summary', 'excel_group', 'excel_row', 'excel',
+                          'text', 'table', 'unknown']
         
         for source, chunks_by_type in grouped.items():
-            # Header cho source
-            header = f"[Nguồn: {source}]"
+            # Lấy metadata từ chunk đầu tiên
+            first_hit = None
+            for chunks in chunks_by_type.values():
+                if chunks:
+                    first_hit = chunks[0]
+                    break
+            
+            # Build header với metadata cấu trúc
+            header_parts = []
+            if first_hit:
+                title = first_hit.payload.get('title', '')
+                doc_number = first_hit.payload.get('doc_number', '')
+                date = first_hit.payload.get('date', '')
+                issuer = first_hit.payload.get('issuer', '')
+                doc_type = first_hit.payload.get('doc_type', '')
+                
+                if title:
+                    header_parts.append(f"Văn bản: {title}")
+                if doc_number:
+                    header_parts.append(f"Số: {doc_number}")
+                if date:
+                    header_parts.append(f"Ngày: {date}")
+                if issuer:
+                    header_parts.append(f"Cơ quan: {issuer}")
+                if doc_type and doc_type != 'khác':
+                    header_parts.append(f"Loại: {doc_type}")
+            
+            if header_parts:
+                header = f"[{' | '.join(header_parts)}]"
+            else:
+                header = f"[Nguồn: {source}]"
             
             # Tìm time_info từ bất kỳ chunk nào
             time_info = None

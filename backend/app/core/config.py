@@ -18,6 +18,10 @@ class Settings(BaseSettings):
 
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     LLM_MODEL: str = os.getenv("LLM_MODEL", "qwen2.5:7b")
+    
+    # Embedding server (có thể tách riêng khỏi LLM server)
+    EMBEDDING_BASE_URL: str = os.getenv("EMBEDDING_BASE_URL", "")
+    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "")
 
     SECRET_KEY: str = os.getenv("SECRET_KEY", "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7")
     ALGORITHM: str = "HS256"
@@ -25,6 +29,11 @@ class Settings(BaseSettings):
 
     def __init__(self, **values):
         super().__init__(**values)
+        # Fallback: nếu EMBEDDING chưa được set, dùng OLLAMA
+        if not self.EMBEDDING_BASE_URL:
+            self.EMBEDDING_BASE_URL = self.OLLAMA_BASE_URL
+        if not self.EMBEDDING_MODEL:
+            self.EMBEDDING_MODEL = self.LLM_MODEL
         if not self.SQLALCHEMY_DATABASE_URI:
             from urllib.parse import quote_plus
             encoded_password = quote_plus(self.POSTGRES_PASSWORD)
