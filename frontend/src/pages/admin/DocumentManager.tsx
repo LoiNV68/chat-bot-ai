@@ -1,4 +1,4 @@
-import { Button } from '@/components/ui/button';
+﻿import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardTitle, CardHeader } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { FileText, Upload, Trash2, Shield, Activity, Search, Filter, ArrowLeft, Clock, User, RotateCcw, Eye, Download } from 'lucide-react';
@@ -33,6 +33,7 @@ const DocumentManager = () => {
     const [viewMode, setViewMode] = useState<'active' | 'trash'>('active');
     const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
     const [selectedDocId, setSelectedDocId] = useState<number | null>(null);
+    const [isDeleting, setIsDeleting] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     const [alertModal, setAlertModal] = useState<{
@@ -59,7 +60,7 @@ const DocumentManager = () => {
         if (hasProcessingDocs && viewMode === 'active') {
             const pollInterval = setInterval(() => {
                 fetchDocuments();
-            }, 10000); // Poll mỗi 10 giây
+            }, 20000); // Poll mỗi 20 giây
             
             return () => clearInterval(pollInterval);
         }
@@ -135,15 +136,17 @@ const DocumentManager = () => {
 
     const confirmDelete = async () => {
         if (!selectedDocId) return;
+        setIsDeleting(true);
         try {
             const token = localStorage.getItem('token');
             await axios.delete(API_ENDPOINTS.DOCUMENTS.BY_ID(selectedDocId), {
                 headers: { Authorization: `Bearer ${token}` }
             });
-            fetchDocuments();
+            await fetchDocuments();
         } catch (error) {
             console.error('Delete failed', error);
         } finally {
+            setIsDeleting(false);
             setIsDeleteModalOpen(false);
             setSelectedDocId(null);
         }
@@ -443,6 +446,7 @@ const DocumentManager = () => {
                 message="Bạn có chắc chắn muốn xóa tài liệu này? Hành động này sẽ chuyển tài liệu vào thùng rác."
                 confirmText="Xóa ngay"
                 cancelText="Quay lại"
+                isLoading={isDeleting}
                 onConfirm={confirmDelete}
                 onCancel={() => setIsDeleteModalOpen(false)}
             />

@@ -9,10 +9,11 @@ interface ConfirmModalProps {
     message: string;
     confirmText?: string;
     cancelText?: string;
-    onConfirm: () => void;
+    onConfirm: () => void | Promise<void>;
     onCancel: () => void;
     type?: 'danger' | 'info' | 'warning';
     showCancel?: boolean;
+    isLoading?: boolean;
 }
 
 const ConfirmModal: React.FC<ConfirmModalProps> = ({
@@ -24,7 +25,8 @@ const ConfirmModal: React.FC<ConfirmModalProps> = ({
     onConfirm,
     onCancel,
     type = 'danger',
-    showCancel = true
+    showCancel = true,
+    isLoading = false
 }) => {
     if (!isOpen) return null;
 
@@ -93,22 +95,31 @@ const ConfirmModal: React.FC<ConfirmModalProps> = ({
                             <Button 
                                 variant="ghost" 
                                 onClick={onCancel}
+                                disabled={isLoading}
                                 className="w-full sm:w-auto text-slate-400 hover:text-white hover:bg-slate-800 transition-all font-medium py-2.5"
                             >
                                 {cancelText}
                             </Button>
                         )}
                         <Button 
-                            onClick={() => {
-                                onConfirm();
+                            onClick={async () => {
+                                await onConfirm();
                                 if (!showCancel) onCancel(); // Auto close if alert mode
                             }}
+                            disabled={isLoading}
                             className={cn(
                                 "w-full sm:w-auto font-bold py-2.5 px-6 transition-all",
                                 config.buttonClass
                             )}
                         >
-                            {confirmText}
+                            {isLoading ? (
+                                <div className="flex items-center gap-2">
+                                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/20 border-t-white" />
+                                    <span>Đang xử lý...</span>
+                                </div>
+                            ) : (
+                                confirmText
+                            )}
                         </Button>
                     </div>
                  </div>
