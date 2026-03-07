@@ -1,412 +1,570 @@
-﻿import os
-import json
+﻿from __future__ import annotations
+
 import gc
-import tempfile
+import json
+import os
 import pathlib
-import uuid
+import re
 import subprocess
+import tempfile
+import uuid
+from datetime import datetime
+from typing import Any
+
 import fitz  # PyMuPDF
 import pdfplumber
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
+from bs4 import BeautifulSoup
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
 
-# =====================================================================
-# MODULE 1: GỌI LLAMA.CPP LẤY METADATA TỰ ĐỘNG
-# =====================================================================
+from app.services.text_normalization import (
+    apply_common_ocr_fixes,
+    clean_ocr_text,
+    fold_text_for_search,
+    normalize_metadata_strings,
+    normalize_unicode,
+    normalize_whitespace,
+)
+
+
+DEFAULT_METADATA: dict[str, Any] = {
+    "doc_type": "Khác",
+    "issuer": "Không xác định",
+    "doc_number": "Không xác định",
+    "date": None,
+    "title": "Không xác định",
+    "section": "khac",
+    "topic": "khac",
+}
+
+ROWS_PER_TABLE_CHUNK = 20
+TABLE_MAX_CHARS = 1200
+
+
+def _safe_log(message: str) -> None:
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        print(message.encode("ascii", "replace").decode("ascii"))
+
+
+def _sanitize_date(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = normalize_whitespace(normalize_unicode(str(value)))
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in {"không xác định", "khong xac dinh", "none", "null"}:
+        return None
+
+    date_patterns = [
+        r"\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b",
+        r"\b(\d{1,2})[-/](\d{1,2})[-/](20\d{2})\b",
+    ]
+    for pattern in date_patterns:
+        m = re.search(pattern, text)
+        if not m:
+            continue
+        if pattern.startswith(r"\b(20"):
+            year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        else:
+            day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return datetime(year, month, day).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+
+    m2 = re.search(
+        r"ngày\s*(\d{1,2})\s*tháng\s*(\d{1,2})\s*năm\s*(20\d{2})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m2:
+        day, month, year = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
+        try:
+            return datetime(year, month, day).strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+
+    return None
+
+
+def _extract_metadata_from_text(page_text: str) -> dict[str, Any]:
+    text = normalize_whitespace(normalize_unicode(page_text))
+    lowered = text.lower()
+
+    data = dict(DEFAULT_METADATA)
+
+    doc_type_rules = [
+        ("Thông_báo", ["thông báo"]),
+        ("Quyết_định", ["quyết định"]),
+        ("Công_văn", ["công văn"]),
+        ("Kế_hoạch", ["kế hoạch"]),
+        ("Báo_cáo", ["báo cáo"]),
+        ("Danh_sách", ["danh sách"]),
+    ]
+    for doc_type, keywords in doc_type_rules:
+        if any(k in lowered for k in keywords):
+            data["doc_type"] = doc_type
+            break
+
+    title_patterns = [
+        r"(THÔNG\s+BÁO[^\n]{0,200})",
+        r"(QUYẾT\s+ĐỊNH[^\n]{0,200})",
+        r"(CÔNG\s+VĂN[^\n]{0,200})",
+    ]
+    for pattern in title_patterns:
+        m = re.search(pattern, text, flags=re.IGNORECASE)
+        if m:
+            data["title"] = normalize_whitespace(m.group(1))
+            break
+
+    number_patterns = [
+        r"Số\s*[:.]?\s*([0-9A-Za-z/\-\.]+)",
+        r"số\s*[:.]?\s*([0-9A-Za-z/\-\.]+)",
+    ]
+    for pattern in number_patterns:
+        m = re.search(pattern, text)
+        if m:
+            candidate = normalize_whitespace(m.group(1))
+            candidate = candidate.strip(".,;:")
+            if candidate:
+                data["doc_number"] = candidate
+                break
+
+    data["date"] = _sanitize_date(text)
+
+    issuer_patterns = [
+        r"(Trường\s+Đại\s+học\s+[^\n]{3,120})",
+        r"(Bộ\s+[^\n]{3,120})",
+    ]
+    for pattern in issuer_patterns:
+        m = re.search(pattern, text, flags=re.IGNORECASE)
+        if m:
+            data["issuer"] = normalize_whitespace(m.group(1))
+            break
+
+    return data
+
+
+def _merge_metadata(primary: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(DEFAULT_METADATA)
+    merged.update(fallback or {})
+
+    for key, value in (primary or {}).items():
+        if value is None:
+            continue
+        if isinstance(value, str):
+            cleaned = normalize_whitespace(normalize_unicode(value))
+            if cleaned and cleaned.lower() not in {"không xác định", "khong xac dinh", "null"}:
+                merged[key] = cleaned
+        else:
+            merged[key] = value
+
+    merged["date"] = _sanitize_date(primary.get("date") if primary else None) or _sanitize_date(
+        fallback.get("date") if fallback else None
+    )
+    return normalize_metadata_strings(merged)
+
+
 def extract_metadata_with_llamacpp(page_1_text: str) -> dict:
-    print("🤖 Đang nhờ Qwen2.5-7B/Llama (Llama.cpp) phân tích Metadata...")
-    
-    if not page_1_text.strip():
-        print("⚠️ Không có text để LLM phân tích, dùng metadata mặc định.")
-        return {"doc_type": "Khác", "issuer": "Không xác định", "doc_number": "Không xác định", "date": None, "title": "Không xác định", "section": "khac", "topic": "khac"}
+    _safe_log("[ingest] extracting metadata")
+
+    base_fallback = _extract_metadata_from_text(page_1_text)
+    if not page_1_text or not page_1_text.strip():
+        return _merge_metadata({}, base_fallback)
 
     llm = ChatOpenAI(
-        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:8080/v1"), 
-        api_key="sk-no-key-required", 
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:8080/v1"),
+        api_key="sk-no-key-required",
         model=os.getenv("LLM_MODEL", "qwen2.5:7b"),
         temperature=0,
-        model_kwargs={"response_format": {"type": "json_object"}} 
+        model_kwargs={"response_format": {"type": "json_object"}},
     )
-    
+
     system_prompt = """
-    Bạn là một chuyên gia văn thư xuất sắc. Hãy đọc văn bản và trích xuất thông tin vào ĐÚNG định dạng JSON sau. Không giải thích thêm.
-    {
-        "doc_type": "Chỉ chọn 1: Thông_báo, Quyết_định, Công_văn, Danh_sách, Kế_hoạch, Khuyến_nghị, Tờ_trình, Báo_cáo, Hợp_đồng, Khác",
-        "issuer": "Tên cơ quan ban hành (VD: Trường Đại học Tài chính - Ngân hàng Hà Nội, Bộ Giáo dục và Đào tạo)",
-        "doc_number": "Số hiệu văn bản (VD: 144/TB-ĐHTNH. Nếu không có: 'Không xác định')",
-        "date": "Ngày tháng ban hành theo định dạng YYYY-MM-DD (VD: 2026-01-19). Nếu không có: 'Không xác định'",
-        "title": "Trích yếu/Tiêu đề chính của văn bản (Ngắn gọn, bỏ qua phần Căn cứ)",
-        "section": "Phân loại mảng nội dung chính (VD: hoc_phi, quy_che, dao_tao, hoc_bong. Viết liền không dấu, snake_case)",
-        "topic": "Chủ đề cụ thể của văn bản (VD: thu_le_phi, mien_giam, diem_ren_luyen. Viết liền không dấu, snake_case)"
-    }
-    """
-    
+Bạn là chuyên gia văn thư. Hãy trích xuất metadata từ văn bản thành JSON.
+{
+  "doc_type": "Thông_báo | Quyết_định | Công_văn | Danh_sách | Kế_hoạch | Báo_cáo | Khác",
+  "issuer": "Tên cơ quan ban hành hoặc 'Không xác định'",
+  "doc_number": "Số hiệu văn bản hoặc 'Không xác định'",
+  "date": "YYYY-MM-DD hoặc 'Không xác định'",
+  "title": "Tiêu đề chính",
+  "section": "snake_case",
+  "topic": "snake_case"
+}
+Không thêm giải thích ngoài JSON.
+"""
+
     messages = [
         SystemMessage(content=system_prompt),
-        HumanMessage(content=f"Văn bản:\n{page_1_text[:2000]}") # Giới hạn token để tránh Llama bị lỗi context
+        HumanMessage(content=f"Văn bản:\n{page_1_text[:3000]}"),
     ]
-    
+
     try:
         response = llm.invoke(messages)
-        data = json.loads(response.content)
-        
-        # Sanitize Date
-        import dateutil.parser
-        date_val = data.get("date", "")
-        if str(date_val).lower() != "không xác định" and str(date_val).strip() != "":
-            try:
-                parsed = dateutil.parser.parse(str(date_val), fuzzy=True)
-                data["date"] = parsed.strftime("%Y-%m-%d")
-            except:
-                data["date"] = None
-        else:
-            data["date"] = None
-            
-        return dict(data)
-    except Exception as e:
-        print(f"❌ Lỗi LLM: {e}")
-        return {"doc_type": "Khác", "issuer": "Không xác định", "doc_number": "Không xác định", "date": None, "title": "Không xác định", "section": "khac", "topic": "khac"}
+        payload = json.loads(response.content)
+    except Exception as exc:
+        _safe_log(f"[ingest] metadata llm failed: {exc}")
+        payload = {}
 
-# =====================================================================
-# MODULE 2: TRÍCH XUẤT BẢNG BIỂU THÀNH MARKDOWN
-# =====================================================================
+    return _merge_metadata(payload, base_fallback)
+
+
+def _looks_like_student_header(header_cells: list[str]) -> bool:
+    folded = fold_text_for_search(" ".join(header_cells))
+    if not folded:
+        return False
+
+    strong_id = any(token in folded for token in ["ma sinh vien", "msv", "ma sv"])
+    strong_name = any(token in folded for token in ["ho ten", "ten sinh vien", "sinh vien"])
+    if strong_id and (strong_name or "lop" in folded):
+        return True
+
+    return False
+
+
+def _chunk_markdown_table(markdown_text: str, max_chars: int = TABLE_MAX_CHARS) -> list[str]:
+    lines = [line for line in markdown_text.split("\n") if line.strip()]
+    if len(lines) <= 3:
+        return [markdown_text]
+
+    header = lines[:2]
+    data_lines = lines[2:]
+    chunks: list[str] = []
+    current: list[str] = []
+
+    for line in data_lines:
+        candidate = "\n".join(header + current + [line])
+        if current and len(candidate) > max_chars:
+            chunks.append("\n".join(header + current))
+            current = [line]
+        else:
+            current.append(line)
+
+    if current:
+        chunks.append("\n".join(header + current))
+
+    return chunks
+
+
+def _build_table_markdown(header: list[str], rows: list[list[str]]) -> str:
+    md_lines = ["| " + " | ".join(header) + " |", "|" + "|".join(["---"] * len(header)) + "|"]
+    for row in rows:
+        if len(row) < len(header):
+            row = row + [""] * (len(header) - len(row))
+        md_lines.append("| " + " | ".join(row[: len(header)]) + " |")
+    return "\n".join(md_lines)
+
+
+def _extract_student_ids(rows: list[list[str]]) -> list[str]:
+    ids: list[str] = []
+    for row in rows:
+        for cell in row:
+            value = re.sub(r"\D", "", cell)
+            if len(value) == 10:
+                ids.append(value)
+                break
+    return list(dict.fromkeys(ids))
+
+
 def extract_tables_to_markdown(pdf_path: str, global_metadata: dict) -> list[Document]:
-    print("📊 Đang xử lý Danh sách dài (Smart Table Chunking)...")
-    table_docs = []
-    
-    # Cấu hình: Gom bao nhiêu dòng (sinh viên) vào 1 chunk?
-    # 20 dòng là con số đẹp để AI vừa đủ hiểu mà không bị quá tải token
-    ROWS_PER_CHUNK = 20 
-    
-    saved_header = None # Lưu trữ tiêu đề để dùng cho các trang sau bị mất tiêu đề
-    
+    _safe_log("[ingest] extracting tables from native pdf")
+    table_docs: list[Document] = []
+    saved_header: list[str] | None = None
+
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages):
-            # Cấu hình extract_tables để bắt bảng tốt nhất
-            tables = page.extract_tables(table_settings={
-                "vertical_strategy": "lines", 
-                "horizontal_strategy": "lines",
-                "snap_tolerance": 3,
-            })
-            
-            # Nếu không bắt được bằng lines, thử text (cho các bảng không kẻ ô)
+            tables = page.extract_tables(
+                table_settings={
+                    "vertical_strategy": "lines",
+                    "horizontal_strategy": "lines",
+                    "snap_tolerance": 3,
+                }
+            )
             if not tables:
-                tables = page.extract_tables(table_settings={
-                    "vertical_strategy": "text", 
-                    "horizontal_strategy": "text"
-                })
+                tables = page.extract_tables(
+                    table_settings={"vertical_strategy": "text", "horizontal_strategy": "text"}
+                )
 
             for table in tables:
-                if not table or len(table) < 2: continue
-                
-                # 1. Xử lý Header (Tiêu đề cột)
-                current_rows = table
-                
-                # Logic thông minh: Kiểm tra xem dòng đầu tiên có phải là Header không?
-                # Nếu dòng đầu chứa các từ khóa như "Mã SV", "Họ tên", "STT"... thì nó là Header
-                first_row_str = " ".join([str(c) for c in current_rows[0] if c]).lower()
-                is_header = "mã" in first_row_str or "stt" in first_row_str or "họ" in first_row_str
-                
-                if is_header:
-                    saved_header = [str(cell).replace('\n', ' ') if cell else "" for cell in current_rows[0]]
-                    data_rows = current_rows[1:] # Bỏ dòng header ra khỏi data
+                if not table or len(table) < 2:
+                    continue
+
+                rows_clean: list[list[str]] = []
+                for row in table:
+                    clean_row = [clean_ocr_text(str(cell or "")) for cell in row]
+                    if any(cell for cell in clean_row):
+                        rows_clean.append(clean_row)
+
+                if len(rows_clean) < 2:
+                    continue
+
+                first_row = rows_clean[0]
+                first_row_text = " ".join(first_row).lower()
+                looks_like_header = _looks_like_student_header(first_row) or any(
+                    token in first_row_text for token in ["stt", "mã", "nội dung", "khóa", "học kỳ"]
+                )
+
+                if looks_like_header:
+                    saved_header = first_row
+                    data_rows = rows_clean[1:]
+                elif saved_header:
+                    data_rows = rows_clean
                 else:
-                    # Nếu trang này không có header, dùng lại header của trang trước (QUAN TRỌNG)
-                    if saved_header:
-                        data_rows = current_rows
-                    else:
-                        # Trường hợp xấu nhất: Không tìm thấy header nào cả
-                        continue
+                    continue
 
-                # 2. Chia nhỏ dữ liệu (Batching)
-                # Thay vì lưu cả bảng to, ta cắt nhỏ ra từng cụm 20 sinh viên
-                for i in range(0, len(data_rows), ROWS_PER_CHUNK):
-                    chunk_rows = data_rows[i : i + ROWS_PER_CHUNK]
-                    
-                    md_lines = []
-                    
-                    # Luôn luôn chèn Header vào đầu mỗi chunk
-                    if saved_header:
-                        md_lines.append("| " + " | ".join(saved_header) + " |")
-                        md_lines.append("|" + "|".join(["---" for _ in saved_header]) + "|")
-                    
-                    # Thêm dữ liệu sinh viên
-                    for row in chunk_rows:
-                        clean_row = [str(cell).replace('\n', ' ') if cell else "" for cell in row]
-                        md_lines.append("| " + " | ".join(clean_row) + " |")
-                    
-                    md_text = "\n".join(md_lines)
-                    
-                    # 3. Tạo Metadata phong phú để tìm kiếm chính xác
-                    # Trích xuất Mã SV từ trong bảng để đưa vào Metadata (Giúp search cực nhanh)
-                    student_ids = []
-                    for row in chunk_rows:
-                        # Giả sử Mã SV thường nằm ở cột thứ 2 (index 1) - Tùy chỉnh theo thực tế
-                        if len(row) > 1 and row[1] and str(row[1]).isdigit():
-                            student_ids.append(str(row[1]))
-                            
-                    meta = global_metadata.copy()
-                    meta.update({
-                        "source": os.path.basename(pdf_path), 
-                        "page": page_num + 1, 
-                        "content_type": "student_list",
-                        "student_ids_in_chunk": student_ids # Lưu danh sách Mã SV có trong chunk này
-                    })
-                    
-                    table_docs.append(Document(page_content=md_text, metadata=meta))
+                if not data_rows:
+                    continue
 
-            # Giải phóng RAM/VRAM sau mỗi trang để tránh tràn bộ nhớ khi file quá dài
+                header = saved_header or first_row
+                content_type = "student_list" if _looks_like_student_header(header) else "table_md"
+
+                for i in range(0, len(data_rows), ROWS_PER_TABLE_CHUNK):
+                    chunk_rows = data_rows[i : i + ROWS_PER_TABLE_CHUNK]
+                    markdown = _build_table_markdown(header, chunk_rows)
+                    for markdown_chunk in _chunk_markdown_table(markdown):
+                        meta = dict(global_metadata)
+                        meta.update(
+                            {
+                                "source": os.path.basename(pdf_path),
+                                "page": page_num + 1,
+                                "content_type": content_type,
+                                "chunk_type": "table",
+                                "ocr_engine": "pdfplumber",
+                                "table_headers": header,
+                                "table_row_count": len(chunk_rows),
+                            }
+                        )
+                        if content_type == "student_list":
+                            meta["student_ids_in_chunk"] = _extract_student_ids(chunk_rows)
+                        table_docs.append(Document(page_content=markdown_chunk, metadata=normalize_metadata_strings(meta)))
+
             gc.collect()
 
-    print(f"✅ Đã chia nhỏ danh sách thành {len(table_docs)} chunks (mỗi chunk {ROWS_PER_CHUNK} sinh viên).")
+    _safe_log(f"[ingest] native table chunks={len(table_docs)}")
     return table_docs
 
-# Chuyển hàm xử lý đường dẫn ra ngoài để tránh định nghĩa lại nhiều lần
-def to_wsl_path(win_path):
+
+def to_wsl_path(win_path: str) -> str:
     p = pathlib.Path(win_path).resolve()
     drive = p.drive.replace(":", "").lower()
     parts = list(p.parts[1:])
     return f"/mnt/{drive}/" + "/".join(parts)
 
+
 def html_table_to_markdown(html_str: str) -> str:
-    from bs4 import BeautifulSoup
-    try:
-        soup = BeautifulSoup(html_str, 'html.parser')
-        markdown_lines = []
-        rows = soup.find_all('tr')
-        for i, row in enumerate(rows):
-            cells = row.find_all(['td', 'th'])
-            cell_texts = [cell.get_text(strip=True).replace('\n', ' ') for cell in cells]
-            if not cell_texts: continue
-            markdown_lines.append("| " + " | ".join(cell_texts) + " |")
-            if i == 0:
-                markdown_lines.append("|" + "|".join(["---" for _ in cells]) + "|")
-        return "\n".join(markdown_lines)
-    except Exception as e:
-        print(f"Lỗi convert HTML sang Markdown: {e}")
-        return html_str
+    soup = BeautifulSoup(html_str, "html.parser")
+    rows = soup.find_all("tr")
+    markdown_lines: list[str] = []
+
+    for i, row in enumerate(rows):
+        cells = row.find_all(["td", "th"])
+        values = [clean_ocr_text(cell.get_text(" ", strip=True)) for cell in cells]
+        values = [apply_common_ocr_fixes(v) for v in values]
+        if not any(values):
+            continue
+        markdown_lines.append("| " + " | ".join(values) + " |")
+        if i == 0:
+            markdown_lines.append("|" + "|".join(["---"] * len(values)) + "|")
+
+    return "\n".join(markdown_lines).strip()
+
 
 def extract_tables_from_scan(pdf_path: str, global_metadata: dict) -> list[Document]:
-    print("📊 Đang nhờ WSL (PP-Structure) quét bảng biểu từ ảnh scan...")
-    
-    temp_dir = "temp"
-    os.makedirs(temp_dir, exist_ok=True)
-    table_docs = []
-    
-    # Sinh một mã định danh ngẫu nhiên cho chuỗi xử lý này (Chống ghi đè file khi gọi API đồng thời)
+    _safe_log("[ingest] extracting tables from scan via ppstructure")
+    table_docs: list[Document] = []
     session_id = uuid.uuid4().hex
-    
+
     try:
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
-        DPI = 200
-        mat = fitz.Matrix(DPI / 72, DPI / 72)
-        
-        # Lấy thư mục gốc dạng WSL (Chỉ cần lấy 1 lần)
+        matrix = fitz.Matrix(200 / 72, 200 / 72)
         wsl_cwd = to_wsl_path(os.getcwd())
-        
+
         for page_num in range(total_pages):
             page = doc[page_num]
-            pix = page.get_pixmap(matrix=mat)
-            
-            # 1. Lưu ảnh ra thư mục temp VỚI TÊN ĐỘC NHẤT
-            temp_img_path = f"{temp_dir}/img_{session_id}_p{page_num}.jpg"
-            temp_json_path = f"{temp_dir}/res_{session_id}_p{page_num}.json"
-            
+            pix = page.get_pixmap(matrix=matrix)
+
+            temp_img_path = os.path.join("temp", f"img_{session_id}_p{page_num}.jpg")
+            temp_json_path = os.path.join("temp", f"res_{session_id}_p{page_num}.json")
+            os.makedirs("temp", exist_ok=True)
             pix.save(temp_img_path)
-            
-            # Chuyển đổi đường dẫn ảnh/json sang định dạng WSL để truyền vào lệnh
-            wsl_img_path = f"{wsl_cwd}/{temp_img_path}"
-            wsl_json_path = f"{wsl_cwd}/{temp_json_path}"
-                
-            # 2. Gọi lệnh WSL (loại bỏ nháy kép để CMD không bị lỗi quote lúc parse)
-            wsl_command = f'wsl -d Ubuntu --cd {wsl_cwd} -e python3 app/services/ppstructure_service.py {wsl_img_path} {wsl_json_path}'
-            
-            result_data = None
+
+            img_rel_path = temp_img_path.replace("\\", "/")
+            json_rel_path = temp_json_path.replace("\\", "/")
+            wsl_img_path = f"{wsl_cwd}/{img_rel_path}"
+            wsl_json_path = f"{wsl_cwd}/{json_rel_path}"
+            command = (
+                f"wsl -d Ubuntu --cd {wsl_cwd} -e python3 "
+                f"app/services/ppstructure_service.py {wsl_img_path} {wsl_json_path}"
+            )
+
             try:
-                # Chạy lệnh
-                res = subprocess.run(wsl_command, shell=True, capture_output=True)
-                
-                if res.returncode != 0:
-                    raise subprocess.CalledProcessError(res.returncode, wsl_command, res.stdout, res.stderr)
-                
-                # 3. Đọc kết quả từ file JSON trung gian
-                if os.path.exists(temp_json_path):
-                    with open(temp_json_path, 'r', encoding='utf-8') as f:
-                        result_data = json.load(f)
-                        
-                    if result_data.get("status") == "success":
-                        tables = result_data.get("tables", [])
-                        
-                        print(f"✅ Trang {page_num+1}: Tìm thấy {len(tables)} bảng HTML.")
-                        for table_html in tables:
-                            md_table = html_table_to_markdown(table_html)
-                            
-                            meta = global_metadata.copy()
-                            meta.update({
-                                "source": os.path.basename(pdf_path), 
-                                "page": page_num + 1, 
-                                "content_type": "table_md_scan"
-                            })
-                            
-                            # CHIA NHỎ BẢNG MARKDOWN TRÁNH MẤT HEADER (CUSTOM SPLITTER)
-                            lines = md_table.split('\n')
-                            if len(lines) > 3: # Có header và ít nhất 1 dòng data
-                                header_lines = lines[0] + '\n' + lines[1]
-                                data_lines = lines[2:]
-                                
-                                current_chunk = ""
-                                for line in data_lines:
-                                    if len(current_chunk) + len(line) > 800:
-                                        # Ghi lại chunk hiện tại
-                                        full_chunk = header_lines + '\n' + current_chunk.strip()
-                                        table_docs.append(Document(page_content=full_chunk, metadata=meta.copy()))
-                                        current_chunk = line + "\n"
-                                    else:
-                                        current_chunk += line + "\n"
-                                
-                                # Ghi lại chunk cuối cùng
-                                if current_chunk.strip():
-                                    full_chunk = header_lines + '\n' + current_chunk.strip()
-                                    table_docs.append(Document(page_content=full_chunk, metadata=meta.copy()))
-                            else:
-                                table_docs.append(Document(page_content=md_table, metadata=meta.copy()))
-                    else:
-                        print(f"⚠️ WSL báo lỗi ở trang {page_num + 1}: {result_data.get('message')}")
-                        
-            except subprocess.CalledProcessError as e:
-                print(f"❌ Lỗi khi gọi WSL ở trang {page_num + 1} (Exit {e.returncode}).")
-            except Exception as e:
-                print(f"❌ Lỗi hệ thống khi gọi WSL: {e}")
-                
+                run_result = subprocess.run(command, shell=True, capture_output=True)
+                if run_result.returncode != 0:
+                    raise RuntimeError(f"ppstructure failed on page {page_num + 1}")
+
+                if not os.path.exists(temp_json_path):
+                    continue
+
+                with open(temp_json_path, "r", encoding="utf-8") as handle:
+                    result_data = json.load(handle)
+
+                for table_html in result_data.get("tables", []):
+                    markdown = html_table_to_markdown(table_html)
+                    if not markdown:
+                        continue
+
+                    markdown_chunks = _chunk_markdown_table(markdown)
+                    for chunk in markdown_chunks:
+                        lines = [line for line in chunk.split("\n") if line.strip()]
+                        header_cells = [c.strip() for c in lines[0].strip("| ").split("|")] if lines else []
+                        row_count = max(len(lines) - 2, 0)
+                        content_type = "student_list" if _looks_like_student_header(header_cells) else "table_md_scan"
+
+                        meta = dict(global_metadata)
+                        meta.update(
+                            {
+                                "source": os.path.basename(pdf_path),
+                                "page": page_num + 1,
+                                "content_type": content_type,
+                                "chunk_type": "table",
+                                "ocr_engine": "ppstructure",
+                                "table_headers": header_cells,
+                                "table_row_count": row_count,
+                            }
+                        )
+                        if content_type == "student_list":
+                            data_rows = [
+                                [c.strip() for c in row.strip("| ").split("|")]
+                                for row in lines[2:]
+                                if row.strip().startswith("|")
+                            ]
+                            meta["student_ids_in_chunk"] = _extract_student_ids(data_rows)
+
+                        table_docs.append(Document(page_content=chunk, metadata=normalize_metadata_strings(meta)))
+            except Exception as exc:
+                _safe_log(f"[ingest] table scan failed page={page_num + 1}: {exc}")
             finally:
-                # 4. Dọn dẹp rác ngay sau khi xử lý xong từng trang
-                if os.path.exists(temp_img_path): os.remove(temp_img_path)
-                if os.path.exists(temp_json_path): os.remove(temp_json_path)
-            
-            # Giải phóng RAM/VRAM sau mỗi trang để tránh tràn bộ nhớ
+                if os.path.exists(temp_img_path):
+                    os.remove(temp_img_path)
+                if os.path.exists(temp_json_path):
+                    os.remove(temp_json_path)
+
             gc.collect()
-            
+
         doc.close()
-    except Exception as e:
-        print(f"❌ Lỗi xử lý PyMuPDF: {e}")
-            
-    print(f"✅ WSL đã trả về {len(table_docs)} bảng (HTML).")
+    except Exception as exc:
+        _safe_log(f"[ingest] scan table extraction failed: {exc}")
+
+    _safe_log(f"[ingest] scan table chunks={len(table_docs)}")
     return table_docs
 
-# =====================================================================
-# MODULE 3: HYBRID OCR CHO PHẦN CHỮ (Gọi qua WSL)
-# =====================================================================
+
+def _extract_json_array(stdout: str) -> list[dict[str, Any]]:
+    if not stdout:
+        return []
+
+    starts = [idx for idx, ch in enumerate(stdout) if ch == "["]
+    for start in reversed(starts):
+        snippet = stdout[start:].strip()
+        try:
+            parsed = json.loads(snippet)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            continue
+    return []
+
+
 def run_hybrid_ocr_wsl(pdf_path: str, global_metadata: dict) -> list[Document]:
-    """
-    Sử dụng kiến trúc lai (PaddleOCR + VietOCR) chạy qua WSL để đảm bảo ổn định.
-    Đã điều chỉnh lại từ Code gốc để tích hợp liền mạch với Windows.
-    """
-    print("🚀 Đang quét OCR các trang văn bản (via WSL)...")
-    text_docs = []
-    
+    _safe_log("[ingest] running hybrid ocr")
+    docs: list[Document] = []
+
     try:
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
-        DPI = 200
-        
-        with tempfile.TemporaryDirectory() as temp_dir:
-            image_paths_windows = []
-            
-            # 1. Chuyển PDF sang ảnh
+        matrix = fitz.Matrix(200 / 72, 200 / 72)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            image_paths: list[str] = []
             for page_num in range(total_pages):
                 page = doc[page_num]
-                mat = fitz.Matrix(DPI / 72, DPI / 72)
-                pix = page.get_pixmap(matrix=mat)
-                
-                img_path = os.path.join(temp_dir, f"page_{page_num}.png")
-                pix.save(img_path)
-                image_paths_windows.append(img_path)
-            
-            doc.close()
-            
-            service_script_windows = os.path.join(os.getcwd(), "app", "services", "hybrid_ocr_service.py")
-            service_script_wsl = to_wsl_path(service_script_windows)
-            image_paths_wsl = [to_wsl_path(p) for p in image_paths_windows]
-            
-            # 3. Gọi WSL Subprocess
-            cmd = ["wsl", "-d", "Ubuntu", "--", "python3", service_script_wsl] + image_paths_wsl
-            
-            process = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
-            
-            if process.returncode != 0:
-                print(f"[ERROR] WSL OCR process failed: {process.stderr}")
-                return []
-            
-            # 4. Parse JSON kết quả và bọc vào Document object
-            output_str = process.stdout
-            json_start = output_str.find("[")
-            if json_start != -1:
-                results = json.loads(output_str[json_start:])
-                for idx, page_res in enumerate(results):
-                    if "text" in page_res:
-                        page_text = page_res["text"]
-                        
-                        # Lọc rác OCR cực ngắn trước khi lưu
-                        clean_lines = []
-                        import re
-                        for line in page_text.split('\n'):
-                            line_str = line.strip()
-                            if not line_str: continue
-                            if len(line_str) <= 3 and not re.search(r'[a-zA-ZáàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđĐ]', line_str):
-                                continue
-                            clean_lines.append(line_str.replace("_", " ")) # Bỏ gạch dưới lỗi
-                        
-                        clean_page_text = '\n'.join(clean_lines)
-                        
-                        meta = global_metadata.copy()
-                        meta.update({"source": os.path.basename(pdf_path), "page": idx + 1, "content_type": "text"})
-                        text_docs.append(Document(page_content=clean_page_text, metadata=meta))
-            else:
-                print(f"[ERROR] No JSON array found in output")
-                
-    except Exception as e:
-        print(f"[ERROR] Hybrid OCR WSL failed: {e}")
-        
-    return text_docs
+                image_path = os.path.join(tmp_dir, f"page_{page_num}.png")
+                page.get_pixmap(matrix=matrix).save(image_path)
+                image_paths.append(image_path)
 
-# =====================================================================
-# MODULE 4: NATIVE TEXT EXTRACTION (CHO VĂN BẢN ĐIỆN TỬ)
-# =====================================================================
+            doc.close()
+
+            script_path = os.path.join(os.getcwd(), "app", "services", "hybrid_ocr_service.py")
+            cmd = [
+                "wsl",
+                "-d",
+                "Ubuntu",
+                "--",
+                "python3",
+                to_wsl_path(script_path),
+                *[to_wsl_path(path) for path in image_paths],
+            ]
+            process = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+            if process.returncode != 0:
+                _safe_log(f"[ingest] hybrid ocr failed: {process.stderr.strip()[:200]}")
+                return []
+
+            page_results = _extract_json_array(process.stdout)
+            for idx, item in enumerate(page_results):
+                raw_text = str(item.get("text", ""))
+                cleaned_text = clean_ocr_text(raw_text)
+                if not cleaned_text:
+                    continue
+
+                meta = dict(global_metadata)
+                meta.update(
+                    {
+                        "source": os.path.basename(pdf_path),
+                        "page": idx + 1,
+                        "content_type": "text",
+                        "chunk_type": "text",
+                        "ocr_engine": "hybrid_ocr",
+                    }
+                )
+                docs.append(Document(page_content=cleaned_text, metadata=normalize_metadata_strings(meta)))
+
+    except Exception as exc:
+        _safe_log(f"[ingest] hybrid ocr exception: {exc}")
+
+    return docs
+
+
 def extract_text_pymupdf(pdf_path: str, global_metadata: dict) -> list[Document]:
-    """
-    Sử dụng PyMuPDF để trích xuất chữ nhanh từ PDF điện tử thay vì OCR qua Mạng/WSL lãng phí.
-    """
-    print("🚀 Đang trích xuất văn bản nguyên bản (PyMuPDF)...")
-    text_docs = []
-    
+    _safe_log("[ingest] extracting native text")
+    docs: list[Document] = []
+
     try:
         doc = fitz.open(pdf_path)
         for page_num in range(len(doc)):
-            page_text = doc[page_num].get_text("text")
-            
-            # Lọc rác (tương tự như luồng OCR)
-            clean_lines = []
-            import re
-            for line in page_text.split('\n'):
-                line_str = line.strip()
-                if not line_str: continue
-                # if len(line_str) <= 3 and not re.search(r'[a-zA-ZáàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđĐ]', line_str):
-                #     continue
-                clean_lines.append(line_str)
-            
-            clean_page_text = '\n'.join(clean_lines)
-            
-            if clean_page_text.strip():
-                meta = global_metadata.copy()
-                meta.update({"source": os.path.basename(pdf_path), "page": page_num + 1, "content_type": "text"})
-                text_docs.append(Document(page_content=clean_page_text, metadata=meta))
-                
-        doc.close()
-    except Exception as e:
-        print(f"[ERROR] PyMuPDF extraction failed: {e}")
-        
-    return text_docs
+            raw_text = doc[page_num].get_text("text")
+            cleaned_text = clean_ocr_text(raw_text)
+            if not cleaned_text:
+                continue
 
+            meta = dict(global_metadata)
+            meta.update(
+                {
+                    "source": os.path.basename(pdf_path),
+                    "page": page_num + 1,
+                    "content_type": "text",
+                    "chunk_type": "text",
+                    "ocr_engine": "native_pdf",
+                }
+            )
+            docs.append(Document(page_content=cleaned_text, metadata=normalize_metadata_strings(meta)))
+
+        doc.close()
+    except Exception as exc:
+        _safe_log(f"[ingest] native text extraction failed: {exc}")
+
+    return docs

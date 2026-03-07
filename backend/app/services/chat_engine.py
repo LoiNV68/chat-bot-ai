@@ -1076,12 +1076,13 @@ Trả lời:"""
                 print(f"[DEBUG] SKIP chunk (empty-td ratio {td_empty}/{td_total}): {content[:60]}...")
                 continue
             
-            # 2. Với table_html_scan: strip HTML rồi kiểm tra text thực tế
-            if content_type == 'table_html_scan':
+            # 2. Với table chunk: strip html/markdown noise rồi kiểm tra text thực tế
+            if content_type in {'table_html_scan', 'table_md_scan', 'table_md'}:
                 stripped = re.sub(r'<[^>]+>', ' ', content)
+                stripped = stripped.replace('|', ' ')
                 stripped = re.sub(r'\s+', ' ', stripped).strip()
                 if len(stripped) < 50:
-                    print(f"[DEBUG] SKIP garbage table_html_scan (stripped len={len(stripped)})")
+                    print(f"[DEBUG] SKIP garbage table chunk (stripped len={len(stripped)})")
                     continue
             
             score = getattr(hit, 'score', 0) or 0
@@ -1521,14 +1522,16 @@ Trả lời:"""
             if td_total > 0 and td_empty / max(td_total, 1) > 0.4:
                 continue  # Hơn 40% cell rỗng → rác
 
-            # FIX B: Giữ nguyên HTML tags từ table_html_scan chunks để LLM hiểu cấu trúc Bảng
-            if content_type == 'table_html_scan':
-                # Chỉ chuẩn hóa khoảng trắng
-                content = re.sub(r'\s+', ' ', content).strip()
-                # Dummy check để tự loại bỏ bảng rác (Bằng cách strip tạm ra tính len)
-                if len(re.sub(r'<[^>]+>', '', content)) < 30:
-                    continue  # Stripped text quá ngắn → rác
-
+            # FIX B: Giữ cấu trúc bảng cho markdown table, chỉ clean tối thiểu
+            if content_type in {'table_html_scan', 'table_md_scan', 'table_md'}:
+                if content_type == 'table_html_scan':
+                    content = re.sub(r'\s+', ' ', content).strip()
+                    if len(re.sub(r'<[^>]+>', '', content)) < 30:
+                        continue
+                else:
+                    content = re.sub(r'\n{3,}', '\n\n', content).strip()
+                    if len(content.replace('|', ' ').strip()) < 30:
+                        continue
             # Cắt content nếu quá dài
             if len(content) > 2000:
                 content = content[:2000] + "\n...[đã cắt bớt]"
@@ -1728,7 +1731,7 @@ Tóm tắt:"""
             return False
 
         content_types = [str(h.payload.get('content_type', '')).lower() for h in hits]
-        table_scan_count = sum(1 for ct in content_types if ct == 'table_html_scan')
+        table_scan_count = sum(1 for ct in content_types if ct in {'table_html_scan', 'table_md_scan', 'table_md'})
         text_count = sum(1 for ct in content_types if ct == 'text')
         unknown_titles = 0
         for h in hits:
@@ -1998,6 +2001,7 @@ Tóm tắt:"""
                 {"key": "scope", "match": {"value": "public"}},  # Key thay thế
             ]
         }
+
 
 
 
