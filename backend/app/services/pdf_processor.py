@@ -1,4 +1,4 @@
-import os
+﻿import os
 import json
 import gc
 import tempfile
@@ -20,13 +20,12 @@ def extract_metadata_with_llamacpp(page_1_text: str) -> dict:
     
     if not page_1_text.strip():
         print("⚠️ Không có text để LLM phân tích, dùng metadata mặc định.")
-        return {"doc_type": "Khác", "issuer": "Không xác định", "doc_number": "Không xác định", "date": "Không xác định", "title": "Không xác định"}
+        return {"doc_type": "Khác", "issuer": "Không xác định", "doc_number": "Không xác định", "date": None, "title": "Không xác định", "section": "khac", "topic": "khac"}
 
     llm = ChatOpenAI(
-        base_url="http://localhost:8080/v1", 
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:8080/v1"), 
         api_key="sk-no-key-required", 
-        # model="qwen", # Có thể thay bằng tên model thực tế của bạn hoặc để mặc định
-        model="MẶC-ĐỊNH-BỎ-QUA-NẾU-DÙNG-LOCAL-LLAMACPP",
+        model=os.getenv("LLM_MODEL", "qwen2.5:7b"),
         temperature=0,
         model_kwargs={"response_format": {"type": "json_object"}} 
     )
@@ -38,7 +37,9 @@ def extract_metadata_with_llamacpp(page_1_text: str) -> dict:
         "issuer": "Tên cơ quan ban hành (VD: Trường Đại học Tài chính - Ngân hàng Hà Nội, Bộ Giáo dục và Đào tạo)",
         "doc_number": "Số hiệu văn bản (VD: 144/TB-ĐHTNH. Nếu không có: 'Không xác định')",
         "date": "Ngày tháng ban hành theo định dạng YYYY-MM-DD (VD: 2026-01-19). Nếu không có: 'Không xác định'",
-        "title": "Trích yếu/Tiêu đề chính của văn bản (Ngắn gọn, bỏ qua phần Căn cứ)"
+        "title": "Trích yếu/Tiêu đề chính của văn bản (Ngắn gọn, bỏ qua phần Căn cứ)",
+        "section": "Phân loại mảng nội dung chính (VD: hoc_phi, quy_che, dao_tao, hoc_bong. Viết liền không dấu, snake_case)",
+        "topic": "Chủ đề cụ thể của văn bản (VD: thu_le_phi, mien_giam, diem_ren_luyen. Viết liền không dấu, snake_case)"
     }
     """
     
@@ -49,10 +50,24 @@ def extract_metadata_with_llamacpp(page_1_text: str) -> dict:
     
     try:
         response = llm.invoke(messages)
-        return json.loads(response.content)
+        data = json.loads(response.content)
+        
+        # Sanitize Date
+        import dateutil.parser
+        date_val = data.get("date", "")
+        if str(date_val).lower() != "không xác định" and str(date_val).strip() != "":
+            try:
+                parsed = dateutil.parser.parse(str(date_val), fuzzy=True)
+                data["date"] = parsed.strftime("%Y-%m-%d")
+            except:
+                data["date"] = None
+        else:
+            data["date"] = None
+            
+        return dict(data)
     except Exception as e:
         print(f"❌ Lỗi LLM: {e}")
-        return {"doc_type": "Khác", "issuer": "Không xác định", "doc_number": "Không xác định", "date": "Không xác định", "title": "Không xác định"}
+        return {"doc_type": "Khác", "issuer": "Không xác định", "doc_number": "Không xác định", "date": None, "title": "Không xác định", "section": "khac", "topic": "khac"}
 
 # =====================================================================
 # MODULE 2: TRÍCH XUẤT BẢNG BIỂU THÀNH MARKDOWN
@@ -155,6 +170,24 @@ def to_wsl_path(win_path):
     parts = list(p.parts[1:])
     return f"/mnt/{drive}/" + "/".join(parts)
 
+def html_table_to_markdown(html_str: str) -> str:
+    from bs4 import BeautifulSoup
+    try:
+        soup = BeautifulSoup(html_str, 'html.parser')
+        markdown_lines = []
+        rows = soup.find_all('tr')
+        for i, row in enumerate(rows):
+            cells = row.find_all(['td', 'th'])
+            cell_texts = [cell.get_text(strip=True).replace('\n', ' ') for cell in cells]
+            if not cell_texts: continue
+            markdown_lines.append("| " + " | ".join(cell_texts) + " |")
+            if i == 0:
+                markdown_lines.append("|" + "|".join(["---" for _ in cells]) + "|")
+        return "\n".join(markdown_lines)
+    except Exception as e:
+        print(f"Lỗi convert HTML sang Markdown: {e}")
+        return html_str
+
 def extract_tables_from_scan(pdf_path: str, global_metadata: dict) -> list[Document]:
     print("📊 Đang nhờ WSL (PP-Structure) quét bảng biểu từ ảnh scan...")
     
@@ -208,26 +241,38 @@ def extract_tables_from_scan(pdf_path: str, global_metadata: dict) -> list[Docum
                         tables = result_data.get("tables", [])
                         
                         print(f"✅ Trang {page_num+1}: Tìm thấy {len(tables)} bảng HTML.")
-                            
-                        # Khởi tạo splitter cho HTML tables để tránh lỗi vượt quá Context Length của API Embedding
-                        html_splitter = RecursiveCharacterTextSplitter(
-                            chunk_size=1000,
-                            chunk_overlap=200,
-                            length_function=len
-                        )
-
                         for table_html in tables:
+                            md_table = html_table_to_markdown(table_html)
+                            
                             meta = global_metadata.copy()
                             meta.update({
                                 "source": os.path.basename(pdf_path), 
                                 "page": page_num + 1, 
-                                "content_type": "table_html_scan"
+                                "content_type": "table_md_scan"
                             })
                             
-                            # Cắt nhỏ bảng HTML nếu nó quá lớn
-                            html_chunks = html_splitter.split_text(table_html)
-                            for chunk in html_chunks:
-                                table_docs.append(Document(page_content=chunk, metadata=meta))
+                            # CHIA NHỎ BẢNG MARKDOWN TRÁNH MẤT HEADER (CUSTOM SPLITTER)
+                            lines = md_table.split('\n')
+                            if len(lines) > 3: # Có header và ít nhất 1 dòng data
+                                header_lines = lines[0] + '\n' + lines[1]
+                                data_lines = lines[2:]
+                                
+                                current_chunk = ""
+                                for line in data_lines:
+                                    if len(current_chunk) + len(line) > 800:
+                                        # Ghi lại chunk hiện tại
+                                        full_chunk = header_lines + '\n' + current_chunk.strip()
+                                        table_docs.append(Document(page_content=full_chunk, metadata=meta.copy()))
+                                        current_chunk = line + "\n"
+                                    else:
+                                        current_chunk += line + "\n"
+                                
+                                # Ghi lại chunk cuối cùng
+                                if current_chunk.strip():
+                                    full_chunk = header_lines + '\n' + current_chunk.strip()
+                                    table_docs.append(Document(page_content=full_chunk, metadata=meta.copy()))
+                            else:
+                                table_docs.append(Document(page_content=md_table, metadata=meta.copy()))
                     else:
                         print(f"⚠️ WSL báo lỗi ở trang {page_num + 1}: {result_data.get('message')}")
                         
@@ -326,3 +371,42 @@ def run_hybrid_ocr_wsl(pdf_path: str, global_metadata: dict) -> list[Document]:
         print(f"[ERROR] Hybrid OCR WSL failed: {e}")
         
     return text_docs
+
+# =====================================================================
+# MODULE 4: NATIVE TEXT EXTRACTION (CHO VĂN BẢN ĐIỆN TỬ)
+# =====================================================================
+def extract_text_pymupdf(pdf_path: str, global_metadata: dict) -> list[Document]:
+    """
+    Sử dụng PyMuPDF để trích xuất chữ nhanh từ PDF điện tử thay vì OCR qua Mạng/WSL lãng phí.
+    """
+    print("🚀 Đang trích xuất văn bản nguyên bản (PyMuPDF)...")
+    text_docs = []
+    
+    try:
+        doc = fitz.open(pdf_path)
+        for page_num in range(len(doc)):
+            page_text = doc[page_num].get_text("text")
+            
+            # Lọc rác (tương tự như luồng OCR)
+            clean_lines = []
+            import re
+            for line in page_text.split('\n'):
+                line_str = line.strip()
+                if not line_str: continue
+                # if len(line_str) <= 3 and not re.search(r'[a-zA-ZáàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđĐ]', line_str):
+                #     continue
+                clean_lines.append(line_str)
+            
+            clean_page_text = '\n'.join(clean_lines)
+            
+            if clean_page_text.strip():
+                meta = global_metadata.copy()
+                meta.update({"source": os.path.basename(pdf_path), "page": page_num + 1, "content_type": "text"})
+                text_docs.append(Document(page_content=clean_page_text, metadata=meta))
+                
+        doc.close()
+    except Exception as e:
+        print(f"[ERROR] PyMuPDF extraction failed: {e}")
+        
+    return text_docs
+

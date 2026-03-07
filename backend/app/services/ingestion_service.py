@@ -1,4 +1,4 @@
-"""
+﻿"""
 Ingestion Service - Pipeline xử lý tài liệu cho RAG tiếng Việt.
 
 Pipeline:
@@ -72,6 +72,11 @@ class IngestionService:
                 existing_doc.is_active = False
                 new_version = existing_doc.version + 1
                 parent_id = existing_doc.id
+                
+                # --- TASK 8: CHỐNG TRÙNG LẶP DỮ LIỆU ---
+                # Xóa sạch Vector của phiên bản PDF cũ khỏi Qdrant để ngăn ngừa 
+                # Embeddings bị nhân đôi trả về 2 kết quả y hệt nhau
+                await self.vector_store.delete_document_vectors(existing_doc.id)
                 
             # 4. Tạo Bản ghi Tài liệu Mới
             new_doc = Document(
@@ -181,10 +186,19 @@ class IngestionService:
             await self.vector_store.upsert_vectors(texts, metadatas_list, ids)
             print(f"[DEBUG] Background ingestion COMPLETED for doc {doc_id}.")
             
-            async with self.db.begin():
-                await self.db.execute(
-                    update(Document).where(Document.id == doc_id).values(is_processed=True)
-                )
+            from app.db.session import AsyncSessionLocal
+            
+            if self.db is not None:
+                async with self.db.begin():
+                    await self.db.execute(
+                        update(Document).where(Document.id == doc_id).values(is_processed=True)
+                    )
+            else:
+                async with AsyncSessionLocal() as session:
+                    async with session.begin():
+                        await session.execute(
+                            update(Document).where(Document.id == doc_id).values(is_processed=True)
+                        )
             print(f"[DEBUG] Document {doc_id} marked as processed.")
         except Exception as e:
             print(f"[DEBUG] Vector upsert failed: {e}")
@@ -197,10 +211,8 @@ class IngestionService:
 # ════════════════════════════════════════════════════════════════
 
 async def run_background_ingestion(doc_id: int, file_path: str, filename: str, version: int, scope: str, target_id: str):
-    from app.db.session import AsyncSessionLocal
     import asyncio
     
     print(f"[DEBUG] Background task started for {filename} (ID: {doc_id})")
-    async with AsyncSessionLocal() as db:
-        service = IngestionService(db)
-        await service.ingest_file_content(doc_id, file_path, filename, version, scope, target_id)
+    service = IngestionService(None)
+    await service.ingest_file_content(doc_id, file_path, filename, version, scope, target_id)

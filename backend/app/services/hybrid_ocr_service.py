@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 
 # Tắt OneDNN để tránh lỗi "NotImplementedError: ConvertPirAttribute2RuntimeAttribute not support" trên WSL
@@ -22,7 +22,42 @@ from vietocr.tool.config import Cfg
 det_model = PaddleOCR(use_angle_cls=True, lang='vi', show_log=False)
 
 # VietOCR: Sử dụng vgg_transformer
+# --- BẮT ĐẦU FIX LỖI SERVER VOCR.VN BỊ SẬP (Errno 111 Connection refused) ---
+import vietocr.tool.utils as vietocr_utils
+from urllib.request import urlopen
+import yaml
+import tempfile
+
+# Lưu lại hàm gốc
+_original_download_config = vietocr_utils.download_config
+
+def safe_download_config(url):
+    try:
+        # Thử tải từ máy chủ gốc vocr.vn
+        return _original_download_config(url)
+    except Exception as e:
+        print(f"[WARN] Máy chủ vocr.vn bị từ chối kết nối ({e}). Chuyển sang tải Config dự phòng từ GitHub...")
+        if 'base.yml' in url:
+            backup_url = "https://raw.githubusercontent.com/pbcquoc/vietocr/master/config/base.yml"
+        else:
+            backup_url = f"https://raw.githubusercontent.com/pbcquoc/vietocr/master/config/{url.split('/')[-1]}"
+            
+        # Dùng urllib thuần túy tải trực tiếp từ Github
+        import urllib.request
+        req = urllib.request.Request(backup_url, headers={'User-Agent': 'Mozilla/5.0'})
+        response = urlopen(req)
+        content = response.read().decode('utf-8')
+        
+        # Parse YAML thủ công
+        config_dict = yaml.safe_load(content)
+        return config_dict
+
+# Ghi đè hàm tải
+vietocr_utils.download_config = safe_download_config
+# Load conf
 config = Cfg.load_config_from_name('vgg_transformer')
+# --- KẾT THÚC BẢN VÁ ---
+
 config['cnn']['pretrained'] = False
 config['device'] = 'cpu' # Mặc định CPU cho ổn định trên WSL
 recognizer = Predictor(config)
@@ -80,10 +115,32 @@ def process_image(image_path):
             continue
 
     # 3. Sắp xếp theo thứ tự đọc (Y trước, X sau)
-    # Dùng y_coord // 15 để nhóm các dòng cùng độ cao
-    extracted_lines.sort(key=lambda item: (item['y_coord'] // 15, item['x_coord']))
+    extracted_lines.sort(key=lambda item: (item['y_coord'], item['x_coord']))
     
-    full_text = "\n".join([item['text'] for item in extracted_lines if item['text'].strip()])
+    grouped_lines = []
+    current_line = []
+    current_y = None
+    
+    for item in extracted_lines:
+        text = item['text'].strip()
+        if not text:
+            continue
+            
+        y = item['y_coord']
+        if current_y is None:
+            current_y = y
+            current_line.append(text)
+        elif abs(y - current_y) <= 20: # Tolerance 20 pixels
+            current_line.append(text)
+        else:
+            grouped_lines.append(" ".join(current_line))
+            current_y = y
+            current_line = [text]
+            
+    if current_line:
+        grouped_lines.append(" ".join(current_line))
+        
+    full_text = "\n".join(grouped_lines)
     return {"text": full_text}
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-from typing import Any, List, Optional
+﻿from typing import Any, List, Optional
 from datetime import datetime
 from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Response
@@ -68,7 +68,8 @@ async def chat_completion(
         chat_result = await chat_engine.chat(
             user_query=chat_request.query,
             history=history_strings, 
-            user_info=current_user
+            user_info=current_user,
+            session_id=session_id
         )
         response_text = chat_result['answer']
         sources = chat_result['sources']

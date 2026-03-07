@@ -4,8 +4,8 @@ import asyncio
 from collections import OrderedDict
 from app.core.config import settings
 
-# Use OpenAI compatible client for llama.cpp server
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
+from langchain_ollama import OllamaEmbeddings
 
 class LRUCache:
     """LRU Cache đơn giản với giới hạn kích thước tối đa."""
@@ -43,13 +43,16 @@ class LLMClient:
         if hasattr(self, '_initialized') and self._initialized:
             return
         
-        # Sử dụng OpenAIEmbeddings - có thể chạy trên server riêng (Windows)
         # Tách riêng khỏi LLM server (WSL) bằng EMBEDDING_BASE_URL
-        self.embedding_model = OpenAIEmbeddings(
+        base_url = settings.EMBEDDING_BASE_URL
+        if base_url and base_url.endswith("/v1"):
+            base_url = base_url[:-3]
+        
+        self.embedding_model = OllamaEmbeddings(
             model=settings.EMBEDDING_MODEL,
-            openai_api_base=settings.EMBEDDING_BASE_URL,
-            openai_api_key="dummy", # llama.cpp doesn't require a real key
-            check_embedding_ctx_length=False # Avoid checks that might fail with local servers
+            base_url=base_url,
+            num_ctx=1536, # Avoid OOM by replacing the default 8192/4096 ctx length
+            num_gpu=0    # Ép buộc Embeddings chạy 100% bằng CPU
         )
         
         # Chat Generation dùng ChatOpenAI kết nối tới llama.cpp server
@@ -93,9 +96,10 @@ class LLMClient:
         
         # Chỉ tính embeddings cho các texts chưa được cache, CHIA BATCH NHỎ tránh quá tải
         if uncached_texts:
-            BATCH_SIZE = 3  # Giảm xuống 1 để an toàn tối đa (tránh timeout/OOM)
+            BATCH_SIZE = 1  # Giảm xuống 1 để an toàn tối đa (tránh timeout/OOM cho bảng HTML dài)
             for i in range(0, len(uncached_texts), BATCH_SIZE):
-                batch_texts = uncached_texts[i : i + BATCH_SIZE]
+                # An toàn: Truncate tối đa 4000 ký tự (~1000 tokens) để không vượt giới hạn num_ctx=1536
+                batch_texts = [text[:4000] for text in uncached_texts[i : i + BATCH_SIZE]]
                 
                 # Retry logic simple
                 attempts = 0
@@ -122,8 +126,8 @@ class LLMClient:
                 
                 if not success:
                     print(f"[ERROR] Embedding failed for batch after {max_attempts} attempts.")
-                    # Fill 0 size 768 to avoid crash loop
-                    zero_vec = [0.0] * 768
+                    # Fill 0 size 1024 to avoid crash loop
+                    zero_vec = [0.0] * 1024
                     for j in range(len(batch_texts)):
                         if (i+j) < len(uncached_indices):
                             results[uncached_indices[i+j]] = zero_vec
@@ -190,12 +194,13 @@ VÍ DỤ:
 - Câu hỏi: "chi tiết hơn"
 - Kết quả: "Cho tôi biết chi tiết hơn về quy trình nộp hồ sơ miễn giảm học phí"
 
-QUY TẮC BẮT BUỘC:
+QUY TẮC BẮT BUỘC (TUÂN THỦ TUYỆT ĐỐI):
 1. CHỈ xuất ra câu hỏi đã viết lại, KHÔNG thêm giải thích.
 2. PHẢI viết 100% bằng tiếng Việt thuần túy.
 3. KHÔNG thêm ký tự Nga, Trung, Hàn, Nhật.
 4. Nếu không có ngữ cảnh liên quan, trả về câu hỏi gốc.
 5. Giữ nguyên tên riêng (tên người, mã sinh viên) không thay đổi.
+6. TUYỆT ĐỐI KHÔNG BỊA ĐẶT GHÉP TÊN SINH VIÊN HOẶC MÃ SINH VIÊN VÀO CÂU HỎI MỚI, NẾU câu hỏi mới đang hỏi chung về một TÀI LIỆU, VĂN BẢN, QUY ĐỊNH (ví dụ: "nội dung của cái ABC", "quyết định bảo lưu"). Chỉ ghép tên nếu người dùng dùng đại từ "của bạn ấy", "của người đó" hoặc có ý hỏi tiếp về người đó.
 
 Lịch sử hội thoại (10 tin nhắn gần nhất):
 {history[-10:] if history else 'Không có'}

@@ -1,4 +1,4 @@
-import os
+﻿import os
 import json
 import gc
 import tempfile
@@ -7,7 +7,7 @@ import uuid
 import subprocess
 import fitz # PyMuPDF
 import pdfplumber
-from pyvi import ViTokenizer
+# from pyvi import ViTokenizer  # Removed: bge-m3 handles Vietnamese natively
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.documents import Document
@@ -25,8 +25,14 @@ from app.services.pdf_processor import (
     extract_metadata_with_llamacpp,
     extract_tables_to_markdown,
     extract_tables_from_scan,
-    run_hybrid_ocr_wsl
+    run_hybrid_ocr_wsl,
+    extract_text_pymupdf
 )
+
+# =====================================================================
+# UTILITIES
+# =====================================================================
+# verify_tokenization_consistency đã bỏ — bge-m3 không cần ViTokenizer
 
 # =====================================================================
 # LUỒNG CHÍNH ĐIỀU PHỐI (MAIN PIPELINE)
@@ -81,16 +87,21 @@ def process_single_file(pdf_file_path: bytes | str, filename: str = None) -> lis
         # 1. Trích xuất text nháp trang 1 để lấy thông tin (sử dụng PyMuPDF cho nhẹ, hoặc Paddle nếu là bản scan)
         print("⚡ Quét nhanh trang 1 để lấy thông tin...")
         page_1_text = ""
+        has_native_text = False
+        doc_total_pages = 1
         try:
             doc = fitz.open(pdf_file_path)
+            doc_total_pages = len(doc)
             if len(doc) > 0:
                 page_1_text = doc[0].get_text("text").strip()
+                if len(page_1_text) > 50:
+                    has_native_text = True
             doc.close()
         except:
             pass
             
         # Nếu PyMuPDF không thấy text (bản scan), làm mồi tạm bằng WSL OCR cho trang 1
-        if not page_1_text or len(page_1_text) < 50:
+        if not has_native_text:
             print("⚡ Bản scan, gọi OCR WSL để làm mồi LLM...")
             # Tạo 1 temp file chỉ chứa trang 1 để tối ưu OCR
             doc = fitz.open(pdf_file_path)
@@ -120,31 +131,71 @@ def process_single_file(pdf_file_path: bytes | str, filename: str = None) -> lis
         if len(table_docs) == 0:
             table_docs = extract_tables_from_scan(pdf_file_path, global_metadata)
         
-        # 4. Trích xuất Chữ (OCR sâu bằng WSL)
-        text_docs = run_hybrid_ocr_wsl(pdf_file_path, global_metadata)
+        # 4. Trích xuất Chữ (OCR sâu hoặc PyMuPDF)
+        if has_native_text:
+            text_docs = extract_text_pymupdf(pdf_file_path, global_metadata)
+        else:
+            text_docs = run_hybrid_ocr_wsl(pdf_file_path, global_metadata)
         
         # 5. Làm sạch và Chunking (Chỉ cắt Text, không cắt Table Markdown)
         print("\n🧹 Tiền xử lý tiếng Việt và cắt đoạn...")
+        
+        # --- FIX OCR HALLUCINATION ---
+        ocr_corrections = {
+            "Kh6a": "Khóa",
+            "Chuo'ng": "Chương",
+            "Tién": "Tiền",
+            "dién": "điện",
+            "nuóc": "nước",
+            "uóng": "uống",
+            "dao tao": "đào tạo",
+            "TRƯỜ HIỆU TRƯỞNG": "KT. HIỆU TRƯỞNG",
+            "ĐẠI HỌC tài chỉnh": "ĐẠI HỌC TÀI CHÍNH"
+        }
+        
         processed_text_docs = []
         for doc_item in text_docs:
             clean_text = " ".join(doc_item.page_content.split())
             if not clean_text.strip(): continue
-            try:
-                segmented_text = ViTokenizer.tokenize(clean_text)
-            except:
-                segmented_text = clean_text # Fallback nếu pyvi lỗi
-            processed_text_docs.append(Document(page_content=segmented_text, metadata=doc_item.metadata))
             
+            # Khắc phục lỗi OCR
+            for wrong, right in ocr_corrections.items():
+                clean_text = clean_text.replace(wrong, right)
+                
+            # Giữ nguyên text gốc — bge-m3 xử lý tiếng Việt trực tiếp
+            processed_text_docs.append(Document(page_content=clean_text, metadata=doc_item.metadata))
+            
+        # --- TASK 9: CHUNKING TWEAK ---
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=600, 
+            chunk_size=800, 
             chunk_overlap=150, 
             length_function=len,
-            separators=["\n\n", "\n", ".", " ", ""]
+            separators=["\nĐiều ", "\nKhoản ", "\nMục ", "\n1.", "\n2.", "\n3.", "\n- ", "\n\n", "\n", ". ", " ", ""]
         )
         final_chunks = text_splitter.split_documents(processed_text_docs)
         
+        # --- TASK 10: TABLE & CONTEXT MERGING ---
+        # Nối đoạn text liền trước vào Table để LLM hiểu context của bảng khi retrieval query hit bảng
+        for tb in table_docs:
+            tb_page = tb.metadata.get('page', 0)
+            # Tìm đoạn text gần nhất (cùng trang hoặc trang liền trước)
+            closest_texts = [t for t in final_chunks if t.metadata.get('page', 0) <= tb_page]
+            if closest_texts:
+                closest_text = closest_texts[-1].page_content
+                # Lấy tối đa 400 ký tự cuối của đoạn text liền trước làm context dẫn dắt
+                context_prefix = f"Ngữ cảnh của bảng:\n{closest_text[-400:]}\n\nNội dung bảng:\n"
+                tb.page_content = context_prefix + tb.page_content
+
         # Gộp Chunk Text và Chunk Table lại
         all_final_docs = final_chunks + table_docs
+        
+        # --- TASK 11: ADVANCED METADATA TRACKING ---
+        all_final_docs.sort(key=lambda x: x.metadata.get('page', 0))
+        for idx, d in enumerate(all_final_docs):
+            d.metadata['chunk_order'] = idx + 1
+            d.metadata['chunk_id'] = f"chunk_{idx + 1}"
+            d.metadata['doc_total_pages'] = doc_total_pages
+            
         print(f"✂️ Tổng cộng: {len(final_chunks)} đoạn text, {len(table_docs)} bảng Markdown.")
         
         return all_final_docs
