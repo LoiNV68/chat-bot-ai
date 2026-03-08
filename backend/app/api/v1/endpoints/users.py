@@ -122,7 +122,7 @@ async def delete_user(
     current_user: User = Depends(deps.get_current_superuser),
 ) -> Any:
     """
-    Deactivate user (Admin only) - Soft delete
+    Delete user (Admin only) - Hard delete
     """
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Bạn không thể xóa tài khoản của chính mình")
@@ -133,9 +133,38 @@ async def delete_user(
     if not user:
         raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
     
-    user.is_active = False
+    from app.models.document import Document
+    from app.models.chat import ChatSession, ChatMessage, FeedbackLoop
+    
+    # Update documents uploaded by user
+    await db.execute(update(Document).where(Document.uploaded_by == user_id).values(uploaded_by=None))
+    
+    # Get user's chat sessions
+    sessions_stmt = select(ChatSession.id).where(ChatSession.user_id == user_id)
+    session_result = await db.execute(sessions_stmt)
+    session_ids = session_result.scalars().all()
+    
+    if session_ids:
+        # Get all messages
+        messages_stmt = select(ChatMessage.id).where(ChatMessage.session_id.in_(session_ids))
+        messages_result = await db.execute(messages_stmt)
+        message_ids = messages_result.scalars().all()
+        
+        if message_ids:
+            # Delete Feedbacks
+            await db.execute(delete(FeedbackLoop).where(FeedbackLoop.chat_message_id.in_(message_ids)))
+        
+        # Delete Messages
+        await db.execute(delete(ChatMessage).where(ChatMessage.session_id.in_(session_ids)))
+        
+        # Delete Sessions
+        await db.execute(delete(ChatSession).where(ChatSession.id.in_(session_ids)))
+    
+    # Delete User
+    await db.execute(delete(User).where(User.id == user_id))
     await db.commit()
-    return {"message": "Đã vô hiệu hóa tài khoản"}
+    
+    return {"message": "Đã xóa tài khoản vĩnh viễn"}
 
 
 @router.patch("/{user_id}/toggle-admin", response_model=UserResponse)

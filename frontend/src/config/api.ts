@@ -24,6 +24,7 @@ export const API_ENDPOINTS = {
   // Users
   USERS: {
     BASE: `${API_URL}/users/`,
+    DELETE: (id: number | string) => `${API_URL}/users/${id}`,
     TOGGLE_ADMIN: (id: number | string) =>
       `${API_URL}/users/${id}/toggle-admin`,
     TOGGLE_ACTIVE: (id: number | string) =>

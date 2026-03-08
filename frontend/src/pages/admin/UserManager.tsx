@@ -1,7 +1,7 @@
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Users, UserPlus, Shield, ShieldOff, Activity, Search, ArrowLeft, UserX, UserCheck, X, GraduationCap, Eye, EyeOff } from 'lucide-react';
+import { Users, UserPlus, Shield, ShieldOff, Activity, Search, ArrowLeft, UserX, UserCheck, X, GraduationCap, Eye, EyeOff, Edit3, Trash2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import axios from 'axios';
 import { API_ENDPOINTS } from '@/config/api';
@@ -32,6 +32,11 @@ const UserManager = () => {
     const [creating, setCreating] = useState(false);
     const [showPassword, setShowPassword] = useState(false);
     const [errors, setErrors] = useState<{ email?: string; password?: string }>({});
+    
+    // Modal sửa người dùng
+    const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+    const [editingUser, setEditingUser] = useState({ id: 0, email: '', password: '', full_name: '', is_superuser: false, role: 'user' as UserRole });
+    const [editing, setEditing] = useState(false);
     
     // Modal xác nhận
     const [confirmModal, setConfirmModal] = useState<{ isOpen: boolean; title: string; message: string; onConfirm: () => void }>({
@@ -99,6 +104,88 @@ const UserManager = () => {
         } finally {
             setCreating(false);
         }
+    };
+
+    const handleEditUserClick = (user: User) => {
+        setEditingUser({
+            id: user.id,
+            email: user.email,
+            password: '', 
+            full_name: user.full_name || '',
+            is_superuser: user.is_superuser,
+            role: user.role
+        });
+        setIsEditModalOpen(true);
+        setErrors({});
+    };
+
+    const handleUpdateUser = async () => {
+        setErrors({});
+        const newErrors: { email?: string; password?: string } = {};
+        
+        if (!editingUser.email) {
+            newErrors.email = 'Vui lòng nhập email';
+        } else {
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!emailRegex.test(editingUser.email)) {
+                newErrors.email = 'Email không hợp lệ (ví dụ: abc@example.com)';
+            }
+        }
+        
+        if (editingUser.password && editingUser.password.length < 4) {
+            newErrors.password = 'Mật khẩu phải có ít nhất 4 ký tự';
+        }
+        
+        if (Object.keys(newErrors).length > 0) {
+            setErrors(newErrors);
+            return;
+        }
+        
+        setEditing(true);
+        try {
+            const token = localStorage.getItem('token');
+            const updateData: any = {
+                email: editingUser.email,
+                full_name: editingUser.full_name,
+                is_superuser: editingUser.is_superuser,
+                role: editingUser.role
+            };
+            
+            if (editingUser.password) {
+                updateData.password = editingUser.password;
+            }
+            
+            await axios.put(`${API_ENDPOINTS.USERS.BASE}${editingUser.id}`, updateData, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            setIsEditModalOpen(false);
+            setErrors({});
+            fetchUsers();
+        } catch (error: any) {
+            setErrors({ email: error.response?.data?.detail || 'Lỗi khi cập nhật tài khoản' });
+        } finally {
+            setEditing(false);
+        }
+    };
+
+    const handleDeleteUser = async (userId: number, email: string) => {
+        setConfirmModal({
+            isOpen: true,
+            title: 'Xóa tài khoản',
+            message: `Bạn có chắc chắn muốn xóa vĩnh viễn tài khoản ${email}? Hành động này không thể hoàn tác và sẽ xóa toàn bộ lịch sử trò chuyện của người dùng này.`,
+            onConfirm: async () => {
+                try {
+                    const token = localStorage.getItem('token');
+                    await axios.delete(API_ENDPOINTS.USERS.DELETE(userId), {
+                        headers: { Authorization: `Bearer ${token}` }
+                    });
+                    fetchUsers();
+                } catch (error: any) {
+                    alert(error.response?.data?.detail || 'Lỗi khi xóa tài khoản');
+                }
+                setConfirmModal(prev => ({ ...prev, isOpen: false }));
+            }
+        });
     };
 
     const handleToggleAdmin = async (userId: number, currentStatus: boolean) => {
@@ -318,6 +405,24 @@ const UserManager = () => {
                                                     >
                                                         {user.is_active ? <UserX className="h-4 w-4" /> : <UserCheck className="h-4 w-4" />}
                                                     </Button>
+                                                    <Button
+                                                        size="sm"
+                                                        variant="ghost"
+                                                        onClick={() => handleEditUserClick(user)}
+                                                        className="text-slate-400 hover:text-blue-400 hover:bg-blue-500/10"
+                                                        title="Sửa thông tin"
+                                                    >
+                                                        <Edit3 className="h-4 w-4" />
+                                                    </Button>
+                                                    <Button
+                                                        size="sm"
+                                                        variant="ghost"
+                                                        onClick={() => handleDeleteUser(user.id, user.email)}
+                                                        className="text-slate-400 hover:text-red-400 hover:bg-red-500/10"
+                                                        title="Xóa vĩnh viễn"
+                                                    >
+                                                        <Trash2 className="h-4 w-4" />
+                                                    </Button>
                                                 </div>
                                             </td>
                                         </tr>
@@ -413,6 +518,95 @@ const UserManager = () => {
                                 className="bg-gradient-to-r from-cyan-600 to-blue-600 text-white hover:from-cyan-500 hover:to-blue-500"
                             >
                                 {creating ? 'Đang tạo...' : 'Tạo tài khoản'}
+                            </Button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Modal sửa người dùng */}
+            {isEditModalOpen && (
+                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
+                    <div className="bg-slate-900 border border-slate-700 rounded-xl p-6 w-full max-w-md">
+                        <div className="flex items-center justify-between mb-6">
+                            <h2 className="text-xl font-semibold text-white">Sửa tài khoản</h2>
+                            <Button variant="ghost" size="sm" onClick={() => setIsEditModalOpen(false)}>
+                                <X className="h-4 w-4" />
+                            </Button>
+                        </div>
+                        <div className="space-y-4">
+                            <div>
+                                <label className="text-sm text-slate-400 mb-1 block">Họ tên</label>
+                                <Input
+                                    placeholder="Nguyễn Văn A"
+                                    value={editingUser.full_name}
+                                    onChange={(e) => setEditingUser({ ...editingUser, full_name: e.target.value })}
+                                    className="bg-slate-800 border-slate-700 text-white"
+                                />
+                            </div>
+                            <div>
+                                <label className="text-sm text-slate-400 mb-1 block">Email *</label>
+                                <Input
+                                    type="email"
+                                    placeholder="email@example.com"
+                                    value={editingUser.email}
+                                    onChange={(e) => {
+                                        setEditingUser({ ...editingUser, email: e.target.value });
+                                        if (errors.email) setErrors({ ...errors, email: undefined });
+                                    }}
+                                    className={`bg-slate-800 border-slate-700 text-white ${errors.email ? 'border-red-500' : ''}`}
+                                />
+                                {errors.email && <p className="text-red-400 text-xs mt-1">{errors.email}</p>}
+                            </div>
+                            <div>
+                                <label className="text-sm text-slate-400 mb-1 block">Mật khẩu mới (để trống nếu không đổi)</label>
+                                <div className="relative">
+                                    <Input
+                                        type={showPassword ? "text" : "password"}
+                                        placeholder="••••••••"
+                                        value={editingUser.password}
+                                        onChange={(e) => {
+                                            setEditingUser({ ...editingUser, password: e.target.value });
+                                            if (errors.password) setErrors({ ...errors, password: undefined });
+                                        }}
+                                        className={`bg-slate-800 border-slate-700 text-white pr-10 ${errors.password ? 'border-red-500' : ''}`}
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowPassword(!showPassword)}
+                                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200"
+                                    >
+                                        {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                    </button>
+                                </div>
+                                {errors.password && <p className="text-red-400 text-xs mt-1">{errors.password}</p>}
+                            </div>
+                            <div>
+                                <label className="text-sm text-slate-400 mb-1 block">Vai trò *</label>
+                                <select
+                                    value={editingUser.role}
+                                    onChange={(e) => setEditingUser({ 
+                                        ...editingUser, 
+                                        role: e.target.value as UserRole
+                                    })}
+                                    className="w-full h-10 px-3 rounded-md bg-slate-800 border border-slate-700 text-white"
+                                >
+                                    <option value="user">Sinh viên</option>
+                                    <option value="lecturer">Giảng viên</option>
+                                    {/* <option value="admin">Quản trị viên</option> */}
+                                </select>
+                            </div>
+                        </div>
+                        <div className="flex justify-end gap-2 mt-6">
+                            <Button variant="ghost" onClick={() => setIsEditModalOpen(false)} className="text-slate-300 hover:text-white hover:bg-slate-700">
+                                Hủy
+                            </Button>
+                            <Button 
+                                onClick={handleUpdateUser} 
+                                disabled={editing || !editingUser.email || !!errors.email || !!errors.password}
+                                className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-500 hover:to-indigo-500"
+                            >
+                                {editing ? 'Đang lưu...' : 'Lưu thay đổi'}
                             </Button>
                         </div>
                     </div>
