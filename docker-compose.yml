@@ -14,6 +14,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - unimind-network
+    restart: always
 
   qdrant:
     image: qdrant/qdrant:latest
@@ -24,23 +25,41 @@ services:
       - qdrant_data:/qdrant/storage
     networks:
       - unimind-network
+    restart: always
 
-#   ollama:
-#     image: ollama/ollama:latest
-#     container_name: unimind-ollama
-#     ports:
-#       - "11434:11434"
-#     volumes:
-#       - ollama_data:/root/.ollama
-#     deploy:
-#       resources:
-#         reservations:
-#           devices:
-#             - driver: nvidia
-#               count: 1
-#               capabilities: [gpu]
-#     networks:
-#       - unimind-network
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: unimind-backend
+    ports:
+      - "2025:2025"
+    depends_on:
+      - db
+      - qdrant
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./backend/uploads:/app/uploads
+    networks:
+      - unimind-network
+    restart: always
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_BASE_URL=http://localhost:2025
+        - VITE_API_PREFIX=/api/v1
+    container_name: unimind-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    networks:
+      - unimind-network
+    restart: always
 
 volumes:
   postgres_data:

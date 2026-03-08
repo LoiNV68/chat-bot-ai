@@ -1,29 +1,32 @@
 # FBU AI Chatbot – SYSTEM ARCHITECTURE DOCUMENT
 
-| Metadata | Details |
-| :--- | :--- |
-| **Author** | Chief Scientist |
-| **Version** | 2.0.0 (Final Architecture) |
+| Metadata         | Details                              |
+| :--------------- | :----------------------------------- |
+| **Author**       | Chief Scientist                      |
+| **Version**      | 2.0.0 (Final Architecture)           |
 | **Architecture** | Private Local RAG + Offline DPO Loop |
-| **Deployment** | On-Premise (Offline/Localhost) |
-| **Core AI** | Qwen 2.5 (7B) + LoRA Adapters |
+| **Deployment**   | On-Premise (Offline/Localhost)       |
+| **Core AI**      | Qwen 2.5 (7B) + LoRA Adapters        |
 
 ---
 
 ## 1. TỔNG QUAN (OVERVIEW)
 
 ### 1.1. Mục tiêu
+
 Hệ thống chatbot đại học thông minh, chạy cục bộ, có khả năng tự cải thiện qua phản hồi của giảng viên.
-* **Time-Aware:** Trả lời đúng theo thời điểm hiệu lực của văn bản.
-* **Security:** Phân quyền dữ liệu (Public/Private).
-* **Continuous Learning:** Tự học từ Feedback (Like/Dislike) qua quy trình DPO Offline.
+
+- **Time-Aware:** Trả lời đúng theo thời điểm hiệu lực của văn bản.
+- **Security:** Phân quyền dữ liệu (Public/Private).
+- **Continuous Learning:** Tự học từ Feedback (Like/Dislike) qua quy trình DPO Offline.
 
 ### 1.2. Tech Stack
-* **AI Engine:** Ollama (Qwen 2.5 7B) + LoRA Adapters.
-* **Backend:** FastAPI, LangChain, Python (PDFPlumber, OpenPyXL).
-* **Frontend:** React (Vite) + TailwindCSS + Shadcn/UI.
-* **Database:** PostgreSQL 16 (Metadata) + Qdrant (Vector).
-* **Infrastructure:** Docker Compose.
+
+- **AI Engine:** Ollama (Qwen 2.5 7B) + LoRA Adapters.
+- **Backend:** FastAPI, LangChain, Python (PDFPlumber, OpenPyXL).
+- **Frontend:** React (Vite) + TailwindCSS + Shadcn/UI.
+- **Database:** PostgreSQL 16 (Metadata) + Qdrant (Vector).
+- **Infrastructure:** Docker Compose.
 
 ---
 
@@ -36,13 +39,13 @@ graph TD
     subgraph "Online Layer (Serving Users)"
         User[Sinh viên/GV] -->|1. Chat Request| API[API Gateway]
         API -->|2. Check Auth| Auth[Auth Service]
-        
+
         subgraph "RAG Inference Flow"
             API -->|3. Rewrite Query| LLM_RW[Qwen Rewrite]
             LLM_RW -->|4. Retrieve (Filter Time/Scope)| VectorDB[(Qdrant)]
             VectorDB -->|5. Generate Answer| LLM_GEN[Qwen Generate]
         end
-        
+
         LLM_GEN -->|6. Response + Citation| User
         User -->|7. Feedback (Like/Dislike)| DB[(PostgreSQL)]
     end
@@ -95,11 +98,13 @@ Row-to-Text: Convert dòng thành câu văn.
 
 PDF Processor (Nâng cấp v2.0):
 
-Dùng pdfplumber: Quét từng trang.
+Dùng PyMuPDF: Quét text kỹ lưỡng.
 
-Detect Table: Nếu phát hiện bảng -> Extract cấu trúc -> Convert sang Markdown Table -> Chunk nguyên khối (không cắt bảng).
+Bản scan OCR (Mới): Tự động phát hiện nếu file không thể đọc bằng chữ (bản scan) -> Gọi Tesseract/PaddleOCR qua WSL để quét ảnh.
 
-Text thường: Cắt bằng RecursiveCharacterTextSplitter (chunk size ~500 chars).
+Detect Table: Nếu phát hiện bảng -> Extract cấu trúc -> Giữ nguyên định dạng Markdown Table ghép với các dòng text xung quanh để AI hiểu bối cảnh (Context Merging).
+
+Text thường: Cây phân cấp làm sạch nhiễu OCR (Sửa lỗi dính chữ) -> Cắt bằng RecursiveCharacterTextSplitter theo các ngữ cảnh Luật (`Điều`, `Khoản`) thay vì cắt cứng theo ký tự.
 
 Indexing:
 
@@ -114,9 +119,13 @@ Filter:
 
 is_current = True (Mặc định).
 
-access_scope = 'public' OR (scope='private' AND user=target_id).
+Retrieve & Sàng lọc: Lấy Vector khớp nhất.
+- Year/Topic Guard (Mới): Tự động loại bỏ các tài liệu nếu khác năm học người dùng hỏi, đảm bảo độ chuẩn xác 100%.
 
-Generate: Qwen 2.5 sinh câu trả lời + Trích dẫn nguồn.
+Generate Logic (Mới):
+- **Bơm Rule Cứng (Deterministic Fallbacks)**: Với các nghiệp vụ phức tạp nhạy cảm như (Nghỉ Tết, Lệ Phí, Đối tượng miễn giảm học phí), hệ thống tự động bóc tách bằng Python Regex và chặn LLM trả lời "ảo giác".
+- Nếu không tìm kiếm được sinh viên/văn bản sẽ bật **Kill-Switch** buộc trả về kết quả rỗng không bịa đặt.
+- Chỉ khi dữ liệu chung chung, Qwen 2.5 mới tiếp quản Generate Answer + Trích dẫn nguồn.
 
 5. CHIẾN LƯỢC HUẤN LUYỆN (OFFLINE TRAINING STRATEGY)
 Lưu ý: Không chạy training khi đang phục vụ sinh viên.
@@ -145,3 +154,4 @@ Admin Portal:
 Document Management (Upload, Version History).
 
 Feedback Review UI: Giao diện cho giảng viên sửa câu trả lời sai của AI (So sánh Side-by-Side: Câu AI vs Câu sửa).
+```

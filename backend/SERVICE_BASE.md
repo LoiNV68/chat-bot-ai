@@ -21,8 +21,9 @@ chat_schema.py
 doc_schema.py
 /services # BUSINESS LOGIC (Core Logic nằm ở đây)
 auth_service.py
-chat_engine.py # Logic RAG: Rewrite, Retrieve, Generate
-ingestion_service.py # Logic đọc File: Excel/PDF -> Vector
+chat_engine.py # Logic RAG: Deterministic Fallbacks, Retrieve, Generate
+ingestion_master.py # Core xử lý Document: PDF/Excel -> Chunks & Tables
+ingestion_service.py # API pipeline lưu file -> DB -> Vector
 vector_store.py # Giao tiếp Qdrant
 llm_client.py # Giao tiếp Ollama
 main.py # Entry point
@@ -84,53 +85,44 @@ class FeedbackLoop(Base):
     self.vector_store = vector_store
     self.db = db
 
-        async def process_upload(self, file: UploadFile, metadata: DocUploadSchema, user_id: int):
+        def process_upload(self, file: UploadFile, metadata: DocUploadSchema, user_id: int):
             # 1. Version Control Check
             # Kiểm tra xem có file nào tên giống vậy đang active không
-            # Nếu có -> Deactivate bản cũ -> Tạo bản mới version++
+            # Nếu có -> Xóa vectors cũ -> Tạo bản mới version++
 
-            # 2. Parse File content
-            chunks = []
-            if file.filename.endswith(".xlsx"):
-                chunks = self._parse_excel(file) # Hàm xử lý Merged Cells
-            elif file.filename.endswith(".pdf"):
-                chunks = self._parse_pdf(file)   # Hàm xử lý PDF Table
+            # 2. Extract & Parse
+            # Chuyển việc bóc tách cho IngestionMaster
+            # - Tự động nhận diện PDF bảng biểu (pdfplumber) -> Giữ nguyên Markdown Table
+            # - Tự động gọi OCR nếu là bản scan (WSL PaddleOCR)
+            # - Sửa lỗi chính tả OCR (Heuristics)
+            # - Chia đoạn văn bản thông minh theo cấu trúc Luật (Điều, Khoản)
 
-            # 3. Enrich Metadata
-            for chunk in chunks:
-                chunk['metadata'].update({
-                    "version": new_version,
-                    "access_scope": metadata.scope,
-                    "effective_date": metadata.effective_date
-                })
-
-            # 4. Save to Vector DB
+            # 3. Save to Vector DB
             await self.vector_store.upsert_vectors(chunks)
 
             return {"status": "success", "chunks_count": len(chunks)}
 
-        def _parse_excel(self, file) -> List[Dict]:
-            # Code dùng openpyxl unmerge cells như đã thiết kế ở Master Plan
-            pass
-
-        def _parse_pdf(self, file) -> List[Dict]:
-            # Code dùng pdfplumber detect table
-            pass
-
     3.2. Chat RAG Engine (app/services/chat_engine.py)Logic xử lý tìm kiếm và trả lời.Pythonclass ChatService:
-    async def chat(self, user_query: str, history: List[str], user_info: User): # Bước 1: Rewrite Query (Viết lại câu hỏi)
+    async def chat(self, user_query: str, history: List[str], user_info: User): # Bước 1: Rewrite Query (Dành riêng cho ngữ cảnh đối thoại)
     refined_query = await self.llm.rewrite_query(user_query, history)
 
             # Bước 2: Build Filter (Time + Security)
-            # Sinh viên A chỉ xem được Public + Private của chính mình
             filters = self._build_security_filter(user_info)
 
             # Bước 3: Retrieve (Tìm kiếm Vector)
             context_docs = await self.vector_store.search(refined_query, filters)
 
-            # Bước 4: Generate (LLM trả lời)
-            # Sử dụng StreamingResponse của FastAPI để trả chữ chạy
-            return self.llm.generate_stream(context_docs, refined_query)
+            # Bước 4: Heuristic Filters (Sàng lọc chủ đề & Năm học)
+            valid_docs = self._apply_topic_guard(context_docs)
+
+            # Bước 5: Deterministic Checking
+            # Hệ thống dùng các hàm Code cứng tự trích xuất dữ liệu khó như Lệ Phí, Lịch Nghỉ Tết
+            # Nếu bắt trúng Rule -> Trả về kết quả luôn để đảm bảo chính xác tuyệt đối.
+            if rule_triggered:
+                 return deterministic_answer
+
+            # Bước 6: Generate (LLM trả lời)
+            return self.llm.generate_stream(valid_docs, refined_query)
 
         def _build_security_filter(self, user: User):
             return {
@@ -142,9 +134,24 @@ class FeedbackLoop(Base):
                             { "key": "target_id", "match": { "value": user.username } }
                         ]
                     }
-                ],
-                # Luôn luôn lấy bản hiện hành
-                "must": [{ "key": "is_current", "match": { "value": True } }]
+                ]
             }
 
-4.  API SPECIFICATION (ENDPOINTS)Thiết kế REST API chuẩn.4.1. Authentication (/api/v1/auth)MethodEndpointRequest BodyDescriptionPOST/loginusername, passwordTrả về JWT TokenGET/meHeader AuthorizationLấy thông tin user hiện tại4.2. Documents (/api/v1/documents)MethodEndpointBody/ParamsDescriptionPOST/uploadfile, effective_date, scopeUpload tài liệu (Multipart/Form-data)GET/?limit=10&active=trueLấy danh sách tài liệuGET/{id}/historyLấy các version cũ của 1 filePOST/{id}/rollbackKhôi phục version cũ4.3. Chat (/api/v1/chat)MethodEndpointBodyDescriptionPOST/completion{query, history}Chat Stream (Server-Sent Events)POST/feedback{session_id, score}Gửi like/dislike4.4. Feedback Loop (/api/v1/feedback) - Dành cho AdminMethodEndpointBodyDescriptionGET/bad-casesLấy danh sách câu trả lời bị DislikePOST/correct{id, chosen_response}Admin nhập câu trả lời đúng5. BẢO MẬT & PERFORMANCE5.1. Authentication MiddlewareFile: app/core/deps.pySử dụng OAuth2PasswordBearer. Mọi request vào các route bảo mật đều phải qua hàm get_current_user để decode JWT và lấy thông tin user.5.2. Async DatabaseSử dụng asyncpg driver cho PostgreSQL để đảm bảo non-blocking I/O. Khi có 100 sinh viên chat cùng lúc, server không bị treo chờ Database.5.3. Vector ConnectionSử dụng QdrantClient(url=..., prefer_grpc=True) để tối ưu tốc độ tìm kiếm.
+4.  API SPECIFICATION (ENDPOINTS)
+
+4.1. Authentication (/api/v1/auth)
+Method | Endpoint | Body/Params | Description
+--- | --- | --- | ---
+POST | /login | username, password | Trả về JWT Token
+GET | /me | Header Auth | Lấy thông tin user hiện tại
+
+4.2. Users Management (/api/v1/users) - Admin Only
+Method | Endpoint | Body/Params | Description
+--- | --- | --- | ---
+GET | / | query skip, limit | Lấy danh sách tài khoản
+POST | / | email, password, role | Tạo tài khoản mới
+PUT | /{id} | email, password, role | Sửa đổi thông tin tài khoản
+DELETE | /{id} | | Xóa vĩnh viễn tài khoản (Hard delete, cascade to chats)
+PATCH | /{id}/toggle-active | | Khóa / Mở khóa tài khoản
+
+4.3. Documents (/api/v1/documents)MethodEndpointBody/ParamsDescriptionPOST/uploadfile, effective_date, scopeUpload tài liệu (Multipart/Form-data)GET/?limit=10&active=trueLấy danh sách tài liệuGET/{id}/historyLấy các version cũ của 1 filePOST/{id}/rollbackKhôi phục version cũ4.3. Chat (/api/v1/chat)MethodEndpointBodyDescriptionPOST/completion{query, history}Chat Stream (Server-Sent Events)POST/feedback{session_id, score}Gửi like/dislike4.4. Feedback Loop (/api/v1/feedback) - Dành cho AdminMethodEndpointBodyDescriptionGET/bad-casesLấy danh sách câu trả lời bị DislikePOST/correct{id, chosen_response}Admin nhập câu trả lời đúng5. BẢO MẬT & PERFORMANCE5.1. Authentication MiddlewareFile: app/core/deps.pySử dụng OAuth2PasswordBearer. Mọi request vào các route bảo mật đều phải qua hàm get_current_user để decode JWT và lấy thông tin user.5.2. Async DatabaseSử dụng asyncpg driver cho PostgreSQL để đảm bảo non-blocking I/O. Khi có 100 sinh viên chat cùng lúc, server không bị treo chờ Database.5.3. Vector ConnectionSử dụng QdrantClient(url=..., prefer_grpc=True) để tối ưu tốc độ tìm kiếm.
