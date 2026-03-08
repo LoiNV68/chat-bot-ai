@@ -148,7 +148,24 @@ const SidebarContent = ({
   user,
   navigate,
   logout,
-}: SidebarContentProps) => (
+}: SidebarContentProps) => {
+  const menuRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setIsSettingsOpen(false);
+      }
+    };
+    if (isSettingsOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [isSettingsOpen, setIsSettingsOpen]);
+
+  return (
   <>
     <div
       className={cn(
@@ -280,7 +297,7 @@ const SidebarContent = ({
       </div>
     </div>
 
-    <div className="border-t border-slate-800 p-4 relative">
+    <div ref={menuRef} className="border-t border-slate-800 p-4 relative">
       {isSettingsOpen && !isCollapsed && (
         <div className="absolute bottom-full left-4 right-4 mb-2 rounded-xl border border-slate-700 bg-slate-900/95 backdrop-blur-xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200 z-50">
           <button
@@ -342,7 +359,8 @@ const SidebarContent = ({
       </button>
     </div>
   </>
-);
+  );
+};
 
 const ChatLayout = () => {
   const { user, logout } = useAuth();
@@ -360,6 +378,18 @@ const ChatLayout = () => {
   const [isTyping, setIsTyping] = useState(false);
   const [lastMessageTime, setLastMessageTime] = useState(0);
   const COOLDOWN_MS = 2000;
+  const chatContainerRef = React.useRef<HTMLDivElement>(null);
+  const chatContextRef = React.useRef<number>(0);
+
+  const scrollToBottom = () => {
+    if (chatContainerRef.current) {
+      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+    }
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, isTyping, currentSessionId]);
 
   useEffect(() => {
     fetchSessions();
@@ -387,6 +417,9 @@ const ChatLayout = () => {
 
   const loadSession = async (sessionId: string) => {
     try {
+      chatContextRef.current += 1;
+      setIsTyping(false);
+      
       setCurrentSessionId(sessionId);
       const token = localStorage.getItem("token");
       const response = await axios.get(API_ENDPOINTS.CHAT.MESSAGES(sessionId), {
@@ -414,6 +447,8 @@ const ChatLayout = () => {
       return;
     }
 
+    const currentContext = chatContextRef.current;
+
     const newMessages = [...messages, { role: "user", content: inputValue }];
     setMessages(newMessages);
     setInputValue("");
@@ -432,9 +467,13 @@ const ChatLayout = () => {
         { headers: { Authorization: `Bearer ${token}` } },
       );
 
+      // Optionally refresh sidebar if it might be a new session
+      if (!currentSessionId) fetchSessions();
+
+      if (chatContextRef.current !== currentContext) return;
+
       if (!currentSessionId && response.data.session_id) {
         setCurrentSessionId(response.data.session_id);
-        fetchSessions();
       }
 
       setMessages((prev) => [
@@ -446,22 +485,27 @@ const ChatLayout = () => {
           has_related_docs: response.data.has_related_docs || false,
         },
       ]);
-      if (!currentSessionId) fetchSessions();
     } catch (error: any) {
       console.error("Chat error:", error);
-      setMessages((prev) => [
-        ...prev,
-        { role: "ai", content: "Xin lỗi, hệ thống đang gặp sự cố." },
-      ]);
+      if (chatContextRef.current === currentContext) {
+        setMessages((prev) => [
+          ...prev,
+          { role: "ai", content: "Xin lỗi, hệ thống đang gặp sự cố." },
+        ]);
+      }
     } finally {
-      setIsTyping(false);
+      if (chatContextRef.current === currentContext) {
+        setIsTyping(false);
+      }
     }
   };
 
   const handleNewChat = () => {
+    chatContextRef.current += 1;
     setCurrentSessionId(null);
     setMessages([]);
     setInputValue("");
+    setIsTyping(false);
     if (window.innerWidth < 768) setIsMobileMenuOpen(false);
   };
 
@@ -642,7 +686,7 @@ const ChatLayout = () => {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+        <div ref={chatContainerRef} className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
           {messages.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full text-center p-8 opacity-50 space-y-4">
               <Bot className="h-16 w-16 text-cyan-500/50" />

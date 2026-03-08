@@ -225,7 +225,7 @@ class VectorStore:
             if not keyword:
                 continue
 
-            field_queries: list[tuple[str, str]] = [("content", keyword)]
+            field_queries: list[tuple[str, str]] = [("content", keyword), ("title", keyword)]
             folded = fold_text_for_search(keyword)
             if folded and folded != keyword.lower().strip():
                 field_queries.append(("content_folded", folded))
@@ -372,3 +372,4 @@ class VectorStore:
         except Exception as exc:
             print(f"[vector] scroll_by_doc_id failed doc_id={doc_id}: {exc}")
             return []
+

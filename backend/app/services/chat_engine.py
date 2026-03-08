@@ -1,4 +1,4 @@
-﻿from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple
 import re
 import datetime
 import unicodedata
@@ -179,18 +179,9 @@ class ChatEngine:
         self._init_reranker()
 
     def _init_reranker(self):
-        try:
-            from sentence_transformers import CrossEncoder
-            
-            # Ép cứng chạy bằng CPU để giải phóng VRAM cho các tác vụ khác (Ollama v.v.)
-            device = "cpu"
-            print(f"[INFO] Tải mô hình BAAI/bge-reranker-large trên {device.upper()}...")
-            self.reranker = CrossEncoder("BAAI/bge-reranker-large", device=device)
-            print("[INFO] BAAI/bge-reranker-large đã sẵn sàng.")
-        except Exception as e:
-            print(f"[WARN] Không thể tải Reranker: {e}")
-            self.reranker = None
-            
+        # Đã gỡ bỏ mô hình BAAI/bge-reranker-large trên CPU để tối ưu hiệu suất và dọn dẹp log.
+        self.reranker = None
+
     def _normalize_text(self, text: str) -> str:
         """Normalize unicode input so keyword/intent matching is stable (NFC)."""
         if not text:
@@ -618,6 +609,7 @@ CHỈ trả về câu hỏi hoàn chỉnh, không giải thích."""
         # Nếu người dùng chỉ định năm/năm học rõ ràng, ưu tiên cứng các hit khớp năm.
         if query_intent != 'student_lookup':
             valid_hits = self._apply_explicit_year_filter(valid_hits, user_query)
+            valid_hits = self._apply_topic_guard(valid_hits, user_query)
         
         # TOP-K ĐỘNG: Văn bản dài (quy định, thông báo) cần nhiều chunks hơn
         if query_intent in ('document_info', 'regulation'):
@@ -651,17 +643,25 @@ CHỈ trả về câu hỏi hoàn chỉnh, không giải thích."""
                     'sources': [],
                     'has_related_docs': False
                 }
-        
-        # --- Nếu không tìm thấy tài liệu nào phù hợp, để LLM trả lời linh hoạt ---
+        # Fallback mềm: nếu có raw hits nhưng bị filter quá gắt, giữ lại vài chunk đầu
+        # cho truy vấn văn bản/lịch để tránh false-negative.
+        if not valid_hits and search_results and query_intent in ('document_info', 'regulation', 'schedule', 'exam'):
+            relaxed_hits = []
+            for hit in search_results:
+                content = str(hit.payload.get('content', '')).strip()
+                if len(content) < 30:
+                    continue
+                relaxed_hits.append(hit)
+                if len(relaxed_hits) >= 3:
+                    break
+            if relaxed_hits:
+                print(f"[Fallback] Relaxed retrieval keeps {len(relaxed_hits)} hits from raw results.")
+                valid_hits = relaxed_hits
+
+        # Nếu vẫn không có dữ liệu phù hợp, trả câu trả lời deterministic có format rõ ràng.
         if not valid_hits:
-            no_doc_prompt = f"""{FORMATTING_SYSTEM_PROMPT}
-
-Người dùng hỏi: {refined_query}
-Bạn không tìm thấy thông tin trong cơ sở dữ liệu.
-Trả lời lịch sự, gợi ý liên hệ phòng ban phù hợp. KHÔNG bịa đặt. Ngắn gọn 2-3 câu.
-
-Trả lời:"""
-            response = await self.llm.generate_response(no_doc_prompt)
+            response = self._build_no_data_response(refined_query, query_intent)
+            await self._update_session_memory(session, user_query, response)
             return {
                 'answer': response,
                 'sources': [],
@@ -725,10 +725,36 @@ Trả lời:"""
             }
         
         
+        deterministic_mien_giam_answer = self._build_mien_giam_subject_answer(refined_query, context_text)
+        if deterministic_mien_giam_answer:
+            await self._update_session_memory(session, user_query, deterministic_mien_giam_answer)
+            return {
+                'answer': deterministic_mien_giam_answer,
+                'sources': [],
+                'has_related_docs': has_related_docs
+            }
+
+        deterministic_fee_answer = self._build_fee_notice_answer(refined_query, context_text)
+        if deterministic_fee_answer:
+            await self._update_session_memory(session, user_query, deterministic_fee_answer)
+            return {
+                'answer': deterministic_fee_answer,
+                'sources': [],
+                'has_related_docs': has_related_docs
+            }
+        deterministic_tet_answer = self._build_tet_notice_answer(refined_query, context_text)
+        if deterministic_tet_answer:
+            await self._update_session_memory(session, user_query, deterministic_tet_answer)
+            return {
+                'answer': deterministic_tet_answer,
+                'sources': [],
+                'has_related_docs': has_related_docs
+            }
+
         # 4. Tạo phản hồi - FIX 2: Prompt đa năng cho mọi loại câu hỏi
         document_answer_rule = ""
         if query_intent == 'document_info':
-            document_answer_rule = "6. CHI TIẾT VĂN BẢN: Nếu tài liệu là Quyết định/Thông báo, hãy liệt kê đầy đủ các Điều/Khoản.\n7. ĐỊNH DẠNG BẢNG: Nếu dữ liệu chứa các thẻ HTML <table>, <tr>, <td>, bạn BẮT BUỘC phải vẽ lại thành Bảng Markdown nguyên trạng gồm các cột và hàng. Tuyệt đối KHÔNG gộp chung các cột thành một dòng văn bản."
+            document_answer_rule = "6. CHI TIẾT VĂN BẢN: Nếu tài liệu là Quyết định/Thông báo, hãy liệt kê đầy đủ các Điều/Khoản.\n7. ĐỊNH DẠNG BẢNG: Chỉ hiển thị Markdown Table khi bảng có dữ liệu thực tế.\n8. BẢNG MẪU/TRỐNG: Nếu các dòng chủ yếu là placeholder (ví dụ '...', ô rỗng, gạch), KHÔNG dựng lại từng dòng; chỉ nêu tên bảng và hướng dẫn ngắn gọn."
         elif query_intent == 'student_lookup':
             document_answer_rule = "6. KILL-SWITCH TÌM KIẾM SINH VIÊN (RẤT QUAN TRỌNG): NẾU bạn không tìm thấy tên sinh viên người dùng hỏi, BẠN PHẢI DỪNG LẠI NGAY LẬP TỨC. Tuyệt đối KHÔNG ĐƯỢC tóm tắt hay phân tích tài liệu (không được in ra Điều 1, Điều 2...). CHỈ trả lời ngắn gọn: 'Rất tiếc, mình không tìm thấy thông tin của [Tên sinh viên] trên hệ thống nhà trường.' và DỪNG."
 
@@ -757,7 +783,18 @@ TRẢ LỜI (Nếu có bảng, hãy dùng cú pháp Markdown Table như | Cột 
         response = await self.llm.generate_response(prompt)
         
         print(f"\n[DEBUG] LLM Raw Response snippet: {response[:200]}...\n")
-        
+
+        if query_intent != 'student_lookup' and self._looks_like_no_data_response(response):
+            print('[NoData Detector] Fallback forced by detector for response opening:', response[:120])
+            response = self._build_no_data_response(refined_query, query_intent)
+            sources = []
+            self._cached_sources[session_key] = []
+            has_related_docs = False
+
+        if query_intent == 'document_info':
+            response = self._suppress_placeholder_tables(response)
+            response = self._enrich_document_info_response(response, context_text, refined_query)
+
         # FIX 5: Validate response — phát hiện hallucination (MSV bịa)
         response = self._validate_response(response, context_text)
         
@@ -829,6 +866,827 @@ Hãy trả lời CHỈ bằng đúng 1 từ: "TRUE" hoặc "FALSE"."""
         except Exception as e:
             print(f"[ERROR] AI Intent check failed: {e}")
             return False
+    def _build_no_data_response(self, query: str, query_intent: str) -> str:
+        """Deterministic fallback response with readable markdown layout."""
+        contact_by_intent = {
+            'document_info': 'Phòng Hành chính - Tổng hợp',
+            'schedule': 'Phòng Đào tạo',
+            'exam': 'Phòng Khảo thí',
+            'regulation': 'Phòng Đào tạo',
+            'student_lookup': 'Phòng Công tác sinh viên',
+        }
+        contact_hint = contact_by_intent.get(query_intent, 'phòng ban liên quan')
+        normalized_query = self._normalize_text(query)
+
+        lines = [
+            "Hiện chưa tìm thấy thông tin phù hợp trong hệ thống cho nội dung bạn hỏi.",
+            "",
+            f"- Nội dung tra cứu: **{normalized_query}**",
+            "- Gợi ý: thử thêm từ khóa như **thông báo**, **quyết định**, **số hiệu văn bản** hoặc **đơn vị ban hành**.",
+            f"- Nếu cần xác nhận chính thức, vui lòng liên hệ **{contact_hint}** của trường.",
+        ]
+        return "\n".join(lines)
+
+    def _looks_like_no_data_response(self, response: str) -> bool:
+        if not response:
+            return False
+
+        folded = self._fold_for_match(response)
+        if not folded:
+            return False
+
+        # Chỉ coi là "no data" khi phần mở đầu đúng mẫu thiếu dữ liệu.
+        folded_head = folded[:220]
+        openers = [
+            'hien chua tim thay thong tin',
+            'khong tim thay thong tin',
+            'chua tim thay thong tin',
+        ]
+        if not any(op in folded_head for op in openers):
+            return False
+
+        # Nếu đã có dấu hiệu câu trả lời nội dung thực tế thì không ép fallback.
+        substantive_markers = [            'ngay ban hanh',
+            'theo van ban',
+            'dieu 1',
+            'dieu 2',
+            'noi dung chinh',
+        ]
+        if any(marker in folded for marker in substantive_markers):
+            return False
+
+        checks = [
+            'hien chua tim thay thong tin',
+            'khong tim thay thong tin',
+            'vui long lien he',
+            'phong ban lien quan',
+        ]
+        hit_count = sum(1 for c in checks if c in folded)
+        return hit_count >= 2
+    def _build_mien_giam_subject_answer(self, query: str, context_text: str) -> str | None:
+        """Deterministic answer for "??i t??ng mi?n, gi?m h?c ph? l? ai/l? g?"."""
+        if not query or not context_text:
+            return None
+
+        q_fold = self._fold_for_match(query)
+        has_subject = 'doi tuong' in q_fold and ('mien' in q_fold or 'giam hoc phi' in q_fold)
+        ask_who = any(token in q_fold for token in ['la ai', 'la gi', 'doi tuong nao'])
+        if not (has_subject and ask_who):
+            return None
+
+        compact_fold = self._fold_for_match(context_text)
+
+        has_item1 = bool(re.search(r'mien giam hoc phi.{0,400}phu luc 1', compact_fold))
+        has_item2 = (
+            bool(re.search(r'81 2021.{0,300}phu luc 2', compact_fold))
+            or bool(re.search(r'phu luc 2.{0,300}81 2021', compact_fold))
+        )
+        if not (has_item1 or has_item2):
+            return None
+
+        item1_text = (
+            'Đối tượng sinh viên được miễn, giảm học phí trực tiếp tại trường theo chính sách '            'ưu đãi, hỗ trợ của Trường Đại học Tài chính - Ngân hàng Hà Nội (theo phụ lục 1).'
+        )
+        item2_text = (
+            'Đối tượng được Nhà nước hỗ trợ đóng học phí theo Nghị định 81/2021/NĐ-CP (theo phụ lục 2).'
+        )
+
+        lines = [
+            '**Đối tượng sinh viên được miễn, giảm học phí gồm:**',
+            '',
+        ]
+        if has_item1:
+            lines.append(f'- {item1_text}')
+        if has_item2:
+            lines.append(f'- {item2_text}')
+
+        lines.append('')
+        lines.append('Nếu bạn cần, mình có thể liệt kê thêm **hồ sơ cụ thể** của từng nhóm theo Phụ lục 1 và Phụ lục 2.')
+        return '\n'.join(lines).strip()
+
+
+    def _build_fee_notice_answer(self, query: str, context_text: str) -> str | None:
+        """Deterministic answer for tuition/fee notice to avoid missing tuition rates."""
+        if not query or not context_text:
+            return None
+
+        q_fold = self._fold_for_match(query)
+        is_fee_query = (
+            ('hoc phi' in q_fold or 'le phi' in q_fold)
+            and any(k in q_fold for k in ['ky 1', 'ky i', '2025 2026', 'thu le phi', 'thu hoc phi'])
+        )
+        if not is_fee_query:
+            return None
+
+        target_semester = ''
+        if re.search(r'\bky\s*(1|i)\b', q_fold):
+            target_semester = 'i'
+        elif re.search(r'\bky\s*(2|ii)\b', q_fold):
+            target_semester = 'ii'
+
+        target_years = re.findall(r'20\d{2}', q_fold)
+        target_years = target_years[:2] if len(target_years) >= 2 else []
+
+        normalized_ctx = self._normalize_text(context_text)
+        header_matches = list(re.finditer(r'\[(.*?)\]', normalized_ctx, flags=re.S))
+
+        selected_header = ''
+        selected_index = -1
+        for idx, match in enumerate(header_matches):
+            candidate = self._normalize_text(match.group(1))
+            candidate_fold = self._fold_for_match(candidate)
+            if target_semester == 'i' and not any(marker in candidate_fold for marker in ['ky i', 'ky 1']):
+                continue
+            if target_semester == 'ii' and not any(marker in candidate_fold for marker in ['ky ii', 'ky 2']):
+                continue
+            if target_years and not all(y in candidate_fold for y in target_years):
+                continue
+            selected_header = candidate
+            selected_index = idx
+            break
+
+        if selected_index < 0 and header_matches:
+            selected_index = 0
+            selected_header = self._normalize_text(header_matches[0].group(1))
+
+        if selected_index >= 0:
+            start = header_matches[selected_index].end()
+            end = header_matches[selected_index + 1].start() if selected_index + 1 < len(header_matches) else len(normalized_ctx)
+            working_ctx = normalized_ctx[start:end]
+        else:
+            working_ctx = normalized_ctx
+
+        compact = re.sub(r'\s+', ' ', working_ctx)
+        compact_fold = self._fold_for_match(working_ctx)
+        header_fold = self._fold_for_match(selected_header)
+
+        if target_semester == 'i':
+            has_semester = any(marker in compact_fold for marker in ['ky i', 'ky 1']) or any(marker in header_fold for marker in ['ky i', 'ky 1'])
+        elif target_semester == 'ii':
+            has_semester = any(marker in compact_fold for marker in ['ky ii', 'ky 2']) or any(marker in header_fold for marker in ['ky ii', 'ky 2'])
+        else:
+            has_semester = any(marker in compact_fold for marker in ['thu hoc phi ky', 'le phi hoc ky', 'hoc phi ky', 'thu le phi ky'])
+        if not has_semester:
+            return None
+
+        title = 'TH\u00d4NG B\u00c1O V\u1ec1 vi\u1ec7c thu h\u1ecdc ph\u00ed K\u1ef3 I, n\u0103m h\u1ecdc 2025-2026'
+        so = ''
+        ngay = ''
+        if selected_header:
+            for part in selected_header.split('|'):
+                part_norm = self._normalize_text(part).strip()
+                if ':' not in part_norm:
+                    continue
+                value = part_norm.split(':', 1)[1].strip()
+                part_fold = self._fold_for_match(part_norm)
+                if part_fold.startswith('van ban') and value:
+                    title = value
+                elif part_fold.startswith('so') and value:
+                    so = value
+                elif part_fold.startswith('ngay') and value:
+                    ngay = value
+
+        def _normalize_amount_token(token: str) -> str:
+            cleaned = re.sub(r'[^0-9\.,]', '', token or '').strip('.,')
+            return cleaned
+
+        def _amount_value(token: str) -> int:
+            digits = re.sub(r'[^0-9]', '', token or '')
+            return int(digits) if digits else 0
+
+        def _looks_like_money(token: str) -> bool:
+            return bool(re.fullmatch(r'\d{1,3}(?:[\.,]\d{3})+', token or ''))
+
+        def _format_fold_amount(token: str) -> str:
+            digits = re.sub(r'[^0-9]', '', token or '')
+            if len(digits) > 3:
+                return f"{digits[:-3]}.{digits[-3:]}"
+            return digits
+
+        tuition_vals = None
+        for raw_line in working_ctx.splitlines():
+            if '|' not in raw_line:
+                continue
+            line_fold = self._fold_for_match(raw_line)
+            if 'chuong trinh' not in line_fold:
+                continue
+            nums = [_normalize_amount_token(x) for x in re.findall(r'[0-9][0-9\.,]*', raw_line)]
+            valid_nums = [x for x in nums if _looks_like_money(x)]
+            if len(valid_nums) >= 3:
+                tuition_vals = tuple(valid_nums[-3:])
+                break
+
+        if not tuition_vals:
+            triple_amount_pattern = re.compile(r'([0-9][0-9\.,]{3,})\s*\|\s*([0-9][0-9\.,]{3,})\s*\|\s*([0-9][0-9\.,]{3,})')
+            for match in triple_amount_pattern.finditer(working_ctx):
+                prefix = working_ctx[max(0, match.start() - 120):match.start()]
+                prefix_fold = self._fold_for_match(prefix)
+                if any(marker in prefix_fold for marker in ['chuong trinh', 'hoc phi', 'dai hoc']):
+                    candidate = tuple(_normalize_amount_token(x) for x in match.groups())
+                    if all(_looks_like_money(x) for x in candidate):
+                        tuition_vals = candidate
+                        break
+
+        fee_rows: List[Tuple[str, str]] = []
+        for m in re.finditer(r'\|\s*\d+\s*\|\s*([^|]+?)\s*\|\s*([0-9][0-9\.,]*\s*[d\u0111]?)\s*\|', working_ctx, flags=re.IGNORECASE):
+            item = re.sub(r'\s+', ' ', m.group(1)).strip(' .;-')
+            amount = re.sub(r'\s+', '', m.group(2)).strip()
+            if len(item) < 3:
+                continue
+            if all(item.lower() != existed[0].lower() for existed in fee_rows):
+                fee_rows.append((item, amount))
+
+        if not fee_rows:
+            m_item = re.search(r'tien dien[^0-9]{0,80}([0-9][0-9\.,]*)\s*d?', compact_fold)
+            if m_item:
+                fee_rows.append(('Ti\u1ec1n \u0111i\u1ec7n \u0110HN\u0110, ti\u1ec1n n\u01b0\u1edbc u\u1ed1ng (c\u1ea3 n\u0103m)', f"{m_item.group(1)}\u0111"))
+
+        total_fee = ''
+        m_total_fold = re.search(r'tong cong\s*([0-9 ]{3,})\s*d', compact_fold)
+        if m_total_fold:
+            formatted = _format_fold_amount(m_total_fold.group(1))
+            if _looks_like_money(formatted):
+                total_fee = formatted + '\u0111'
+
+        if not total_fee:
+            for raw_line in working_ctx.splitlines():
+                if 'tong cong' not in self._fold_for_match(raw_line):
+                    continue
+                nums = [_normalize_amount_token(x) for x in re.findall(r'[0-9][0-9\.,]*', raw_line)]
+                nums = [x for x in nums if _looks_like_money(x)]
+                if nums:
+                    total_fee = nums[-1] + '\u0111'
+                    break
+
+        m_time = re.search(
+            r'tu ngay\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})\s*den(?:\s*het)?\s*ngay\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})',
+            compact_fold,
+        )
+        time_range = f"{m_time.group(1)} - {m_time.group(2)}" if m_time else ''
+
+        pay_methods = []
+        if 'nop tien mat' in compact_fold:
+            pay_methods.append('N\u1ed9p ti\u1ec1n m\u1eb7t t\u1ea1i Ph\u00f2ng K\u1ebf ho\u1ea1ch - T\u00e0i ch\u00ednh (T\u1ea7ng 1, t\u00f2a nh\u00e0 31 D\u1ecbch V\u1ecdng H\u1eadu).')
+        if 'qr code' in compact_fold:
+            pay_methods.append('N\u1ed9p qua QR-Code \u0111\u1ed9ng tr\u00ean c\u1ed5ng sinh vi\u00ean.')
+        if 'the atm noi dia' in compact_fold or 'may pos' in compact_fold:
+            pay_methods.append('N\u1ed9p qua th\u1ebb ATM n\u1ed9i \u0111\u1ecba t\u1ea1i Ph\u00f2ng K\u1ebf ho\u1ea1ch - T\u00e0i ch\u00ednh (m\u00e1y POS).')
+
+        portal = ''
+        m_url = re.search(r'https?://\S+', working_ctx)
+        if m_url:
+            portal = m_url.group(0).rstrip('.),;')
+
+        if not tuition_vals and not fee_rows:
+            return None
+
+        lines = [f'**{title}**', '']
+        meta = []
+        if so:
+            meta.append(f'**S\u1ed1:** {so}')
+        if ngay:
+            meta.append(f'**Ng\u00e0y:** {ngay}')
+        if meta:
+            lines.append(' | '.join(meta))
+            lines.append('')
+
+        if tuition_vals:
+            lines.append('**M\u1ee9c h\u1ecdc ph\u00ed (\u0111\u1ed3ng/t\u00edn ch\u1ec9):**')
+            lines.append(f'- Kh\u00f3a 11: **{tuition_vals[0]}**')
+            lines.append(f'- Kh\u00f3a 12: **{tuition_vals[1]}**')
+            lines.append(f'- Kh\u00f3a 13: **{tuition_vals[2]}**')
+            lines.append('')
+
+        if fee_rows:
+            lines.append('**C\u00e1c kho\u1ea3n l\u1ec7 ph\u00ed:**')
+            for item, amount in fee_rows[:5]:
+                lines.append(f'- {item}: **{amount}**')
+            if total_fee:
+                lines.append(f'- T\u1ed5ng c\u1ed9ng: **{total_fee}**')
+            lines.append('')
+
+        if time_range:
+            lines.append(f'**Th\u1eddi gian thu:** {time_range}')
+        if portal:
+            lines.append(f'**C\u1ed5ng thanh to\u00e1n:** {portal}')
+        if pay_methods:
+            lines.append('**Ph\u01b0\u01a1ng th\u1ee9c n\u1ed9p:**')
+            for method in pay_methods[:3]:
+                lines.append(f'- {method}')
+
+        return '\n'.join(lines).strip()
+
+
+    def _clean_directive_body(self, text: str) -> str:
+        cleaned = self._normalize_text(str(text))
+        cleaned = re.sub(r'<[^>]+>', ' ', cleaned)
+        cleaned = re.sub(r'\[[^\]]+\]', ' ', cleaned)
+        cleaned = cleaned.replace('|', ' ')
+        cleaned = cleaned.replace('---', ' ')
+        for marker in ['Trân trọng', '- Nơi nhận', 'KT. BỘ TRƯỞNG', 'KT. BO TRUONG', 'THỨ TRƯỞNG', 'THU TRUONG']:
+            idx = cleaned.find(marker)
+            if idx != -1:
+                cleaned = cleaned[:idx]
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip(' -;,. ')
+        return cleaned
+    def _build_tet_notice_answer(self, query: str, context_text: str) -> str | None:
+        """Deterministic extractor for Tet notice content to avoid LLM omitting key directives."""
+        if not query or not context_text:
+            return None
+
+        q_fold = self._fold_for_match(query)
+        if not ('tet' in q_fold and 'nguyen dan' in q_fold):
+            return None
+
+        ctx_fold = self._fold_for_match(context_text)
+        if 'tet' not in ctx_fold:
+            return None
+
+        working = context_text
+        anchor = re.search(r'các công việc sau đây\s*[:.]', working, flags=re.IGNORECASE)
+        if anchor:
+            working = working[anchor.end():]
+
+        tail_markers = ['- Nơi nhận', 'Trân trọng', 'KT. BỘ TRƯỞNG', 'KT. BO TRUONG', 'THỨ TRƯỞNG', 'THU TRUONG']
+        cut_idx = len(working)
+        for marker in tail_markers:
+            pos = working.find(marker)
+            if pos != -1 and pos < cut_idx:
+                cut_idx = pos
+        working = working[:cut_idx]
+
+        item_pattern = re.compile(
+            r'(?m)(?<!\d)(\d{1,2})\s*[\.,]\s*(.+?)(?=(?:\n\s*\d{1,2}\s*[\.,]\s)|\Z)',
+            re.S
+        )
+        directives: Dict[int, str] = {}
+        for num_str, body in item_pattern.findall(working):
+            num = int(num_str)
+            if num < 1 or num > 12:
+                continue
+            cleaned = self._clean_directive_body(body)
+            if len(cleaned) < 40:
+                continue
+            current = directives.get(num, '')
+            if len(cleaned) > len(current):
+                directives[num] = cleaned
+
+        if not directives:
+            return None
+
+        so = ''
+        ngay = ''
+        header_match = re.search(r'\[(.*?)\]', context_text, flags=re.S)
+        if header_match:
+            header = header_match.group(1)
+            m_so = re.search(r'Số:\s*([^|]+)', header)
+            if m_so:
+                so = self._normalize_text(m_so.group(1)).strip()
+            m_ngay = re.search(r'Ngày:\s*([^|]+)', header)
+            if m_ngay:
+                ngay = self._normalize_text(m_ngay.group(1)).strip()
+
+        lines = ['**Thông báo nghỉ Tết Nguyên đán 2026**', '']
+        meta = []
+        if so:
+            meta.append(f'**Số:** {so}')
+        if ngay:
+            meta.append(f'**Ngày ban hành:** {ngay}')
+        if meta:
+            lines.append(' | '.join(meta))
+            lines.append('')
+
+        for num in sorted(directives.keys()):
+            lines.append(f'**Điều {num}:** {directives[num]}')
+            lines.append('')
+
+        return '\n'.join(lines).strip()
+
+    def _is_markdown_table_separator(self, line: str) -> bool:
+        if not line:
+            return False
+        return bool(re.match(r'^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$', line))
+
+    def _is_placeholder_cell(self, cell: str) -> bool:
+        if cell is None:
+            return True
+        value = self._normalize_text(str(cell)).strip().lower()
+        if not value:
+            return True
+        if value in {'.', '..', '...', '…', '-', '--', '---', '_'}:
+            return True
+        if re.fullmatch(r'[\.\-–_\s]+', value):
+            return True
+        return False
+
+    def _suppress_placeholder_tables(self, response: str) -> str:
+        """Remove markdown tables that are only template placeholders (e.g. rows filled with "..." )."""
+        if not response or '|' not in response:
+            return response
+
+        lines = response.split('\n')
+        output = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i]
+            next_line = lines[i + 1] if i + 1 < len(lines) else ''
+
+            if '|' in line and self._is_markdown_table_separator(next_line):
+                j = i + 2
+                while j < len(lines) and '|' in lines[j]:
+                    j += 1
+
+                table_lines = lines[i:j]
+                rows = []
+                for row in table_lines:
+                    if self._is_markdown_table_separator(row):
+                        continue
+                    cells = [c.strip() for c in row.strip().strip('|').split('|')]
+                    if cells:
+                        rows.append(cells)
+
+                data_rows = rows[1:] if len(rows) > 1 else []
+                placeholder_rows = 0
+                for cells in data_rows:
+                    check_cells = cells[1:] if len(cells) > 1 else cells
+                    meaningful_cells = [c for c in check_cells if not self._is_placeholder_cell(c)]
+                    if not meaningful_cells:
+                        placeholder_rows += 1
+
+                if data_rows and placeholder_rows >= max(1, int(len(data_rows) * 0.6)):
+                    output.append("*Bảng trong văn bản là biểu mẫu trống/placeholder nên mình không liệt kê từng dòng để tránh gây hiểu sai.*")
+                else:
+                    output.extend(table_lines)
+
+                i = j
+                continue
+
+            output.append(line)
+            i += 1
+
+        cleaned = '\n'.join(output)
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+        return cleaned
+
+    def _clean_context_line(self, line: str) -> str:
+        if not line:
+            return ""
+        text = self._normalize_text(str(line))
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        text = re.sub(r'^[-*]+\s*', '', text)
+        text = re.sub(r'^\d+\.\s*', '', text)
+        if not text:
+            return ""
+        lowered = text.lower()
+        if text in {'---', '|', '||'}:
+            return ""
+        if lowered.startswith('[') and lowered.endswith(']'):
+            return ""
+        if '[đã cắt bớt]' in lowered:
+            return ""
+        if '|' in text:
+            return ""
+        return text
+
+    def _detect_document_section(self, line: str) -> str | None:
+        folded = self._fold_for_match(line)
+        if not folded:
+            return None
+        if 'doi tuong' in folded and any(k in folded for k in ['ho so', 'mien giam hoc phi', 'nop ho so']):
+            return 'Đối tượng và hồ sơ'
+        if 'thoi gian' in folded and any(k in folded for k in ['nop ho so', 'nhan ho so', 'han nop']):
+            return 'Thời gian nộp hồ sơ'
+        if 'dia diem' in folded and any(k in folded for k in ['nop ho so', 'nhan ho so']):
+            return 'Địa điểm nộp hồ sơ'
+        if 'luu y' in folded or 'han nop hoc phi' in folded:
+            return 'Lưu ý'
+        return None
+
+    def _collect_document_sections(self, context_text: str) -> Dict[str, List[str]]:
+        sections: Dict[str, List[str]] = {
+            'Đối tượng và hồ sơ': [],
+            'Thời gian nộp hồ sơ': [],
+            'Địa điểm nộp hồ sơ': [],
+            'Lưu ý': [],
+        }
+        current_section: str | None = None
+
+        for raw in context_text.split('\n'):
+            raw_text = self._normalize_text(str(raw)).strip()
+            marker = self._detect_document_section(raw_text)
+            if marker:
+                current_section = marker
+
+                # Nếu marker line có dữ liệu thực tế (không chỉ là heading), giữ lại làm ý.
+                tail = ''
+                if ':' in raw_text:
+                    tail = raw_text.split(':', 1)[1].strip()
+                candidate_tail = self._clean_context_line(tail)
+                candidate_full = self._clean_context_line(raw_text)
+                candidate = candidate_full if candidate_full else candidate_tail
+
+                is_heading_only = raw_text.endswith(':') and not candidate_tail
+                if candidate and not is_heading_only:
+                    if candidate not in sections[current_section]:
+                        sections[current_section].append(candidate)
+                    if len(sections[current_section]) >= 8:
+                        current_section = None
+                continue
+
+            line = self._clean_context_line(raw_text)
+            if not line:
+                continue
+
+            if current_section:
+                if line not in sections[current_section]:
+                    sections[current_section].append(line)
+                if len(sections[current_section]) >= 8:
+                    current_section = None
+
+        return sections
+    def _detect_generic_heading(self, line: str) -> str | None:
+        text = self._normalize_text(line).strip()
+        if not text:
+            return None
+
+        folded = self._fold_for_match(text)
+        if not folded:
+            return None
+
+        if any(stop in folded for stop in ['noi nhan', 'hieu truong', 'doc lap tu do hanh phuc']):
+            return None
+
+        if re.match(r'^(dieu|muc|phan|chuong|khoan)\s*[0-9ivxlc]+', folded):
+            return text.rstrip(':').strip()
+
+        numbered = re.match(r'^\s*\d+\.\s*(.+)$', text)
+        if numbered:
+            candidate = numbered.group(1).strip().rstrip(':')
+            candidate_fold = self._fold_for_match(candidate)
+            section_tokens = [
+                'doi tuong', 'thoi gian', 'dia diem', 'ho so', 'luu y',
+                'muc thu', 'hoc phi', 'le phi', 'phuong thuc', 'dieu kien',
+                'quyen loi', 'nghia vu', 'thoi han', 'thanh phan',
+            ]
+            if len(candidate.split()) <= 15 and (
+                text.rstrip().endswith(':') or any(tok in candidate_fold for tok in section_tokens)
+            ):
+                return candidate
+
+        if text.endswith(':'):
+            candidate = text.rstrip(':').strip()
+            candidate_fold = self._fold_for_match(candidate)
+            if 2 <= len(candidate.split()) <= 15 and not re.search(r'\b20\d{2}\b', candidate) and candidate_fold:
+                return candidate
+
+        return None
+
+    def _collect_generic_document_sections(self, context_text: str, max_sections: int = 8, max_items: int = 8) -> List[Dict[str, Any]]:
+        sections: List[Dict[str, Any]] = []
+        current_section: Dict[str, Any] | None = None
+
+        def get_or_create_section(title: str) -> Dict[str, Any]:
+            for sec in sections:
+                if self._fold_for_match(sec.get('title', '')) == self._fold_for_match(title):
+                    return sec
+            sec = {'title': title, 'items': []}
+            sections.append(sec)
+            return sec
+
+        for raw in context_text.split('\n'):
+            raw_text = self._normalize_text(str(raw)).strip()
+            if not raw_text:
+                continue
+
+            if raw_text.startswith('[') and raw_text.endswith(']'):
+                continue
+
+            raw_fold = self._fold_for_match(raw_text)
+            if any(skip in raw_fold for skip in ['cong hoa xa hoi chu nghia', 'doc lap tu do hanh phuc']):
+                continue
+
+            heading = self._detect_generic_heading(raw_text)
+            if heading:
+                current_section = get_or_create_section(heading)
+                continue
+
+            cleaned = self._clean_context_line(raw_text)
+            if not cleaned:
+                continue
+            if len(cleaned) > 260:
+                continue
+
+            if current_section is None:
+                continue
+
+            cleaned_fold = self._fold_for_match(cleaned)
+            if any(skip in cleaned_fold for skip in ['noi nhan', 'hieu truong', 'ky ten', 'doc lap tu do hanh phuc']):
+                continue
+
+            if cleaned not in current_section['items']:
+                current_section['items'].append(cleaned)
+                if len(current_section['items']) >= max_items:
+                    current_section = None
+
+        filtered: List[Dict[str, Any]] = []
+        for sec in sections:
+            title = str(sec.get('title', '')).strip()
+            items = [str(x).strip() for x in sec.get('items', []) if str(x).strip()]
+            if not title or not items:
+                continue
+            if len(title) > 140:
+                continue
+            filtered.append({'title': title, 'items': items[:max_items]})
+
+        return filtered[:max_sections]
+
+    def _collect_relevant_tables(self, context_text: str, max_tables: int = 2, max_rows: int = 6) -> List[Dict[str, Any]]:
+        tables: List[Dict[str, Any]] = []
+        lines = context_text.split('\n')
+        i = 0
+
+        while i < len(lines) - 1:
+            line = lines[i].strip()
+            next_line = lines[i + 1].strip()
+
+            if '|' in line and self._is_markdown_table_separator(next_line):
+                j = i + 2
+                while j < len(lines) and '|' in lines[j]:
+                    j += 1
+
+                block = lines[i:j]
+                header_cells = [c.strip() for c in block[0].strip().strip('|').split('|') if c.strip()]
+                if not header_cells:
+                    i = j
+                    continue
+
+                rows: List[List[str]] = []
+                for raw_row in block[2:]:
+                    cells = [c.strip() for c in raw_row.strip().strip('|').split('|')]
+                    if not any(cells):
+                        continue
+                    if all(self._is_placeholder_cell(c) for c in cells):
+                        continue
+                    if any(re.search(r'\d{1,3}(?:[\.,]\d{3})+', c) for c in cells):
+                        norm_row = cells[:len(header_cells)]
+                        if len(norm_row) < len(header_cells):
+                            norm_row += [''] * (len(header_cells) - len(norm_row))
+                        rows.append(norm_row)
+
+                if rows:
+                    table_fold = self._fold_for_match(' '.join(header_cells) + ' ' + ' '.join(' '.join(r) for r in rows))
+                    tables.append({'headers': header_cells, 'rows': rows[:max_rows], 'table_fold': table_fold})
+
+                i = j
+                continue
+
+            i += 1
+
+        return tables[:max_tables]
+
+    def _render_compact_markdown_table(self, headers: List[str], rows: List[List[str]]) -> List[str]:
+        if not headers:
+            return []
+
+        col_count = max(len(headers), max((len(r) for r in rows), default=0))
+        norm_headers = headers[:col_count] + [f'C\u1ed9t {idx}' for idx in range(len(headers) + 1, col_count + 1)]
+
+        rendered = [
+            '| ' + ' | '.join(norm_headers) + ' |',
+            '| ' + ' | '.join(['---'] * col_count) + ' |',
+        ]
+
+        for row in rows:
+            norm_row = row[:col_count]
+            if len(norm_row) < col_count:
+                norm_row += [''] * (col_count - len(norm_row))
+            rendered.append('| ' + ' | '.join(norm_row) + ' |')
+
+        return rendered
+
+    def _build_generic_document_outline(self, query: str, context_text: str) -> str | None:
+        if not query or not context_text:
+            return None
+
+        sections = self._collect_generic_document_sections(context_text)
+        tables = self._collect_relevant_tables(context_text)
+
+        if len(sections) < 2 and not tables:
+            return None
+
+        q_fold = self._fold_for_match(query)
+        stop_tokens = {'cho', 'toi', 'biet', 've', 'va', 'la', 'gi', 'noi', 'dung', 'cua', 'nam', 'hoc', 'ky'}
+        query_tokens = [t for t in q_fold.split() if len(t) >= 3 and t not in stop_tokens]
+
+        scored_sections: List[Tuple[int, int, Dict[str, Any]]] = []
+        for idx, sec in enumerate(sections):
+            haystack = self._fold_for_match(sec['title'] + ' ' + ' '.join(sec['items'][:6]))
+            score = sum(1 for token in query_tokens if token in haystack)
+
+            if any(k in q_fold for k in ['hoc phi', 'le phi', 'muc thu', 'chi phi']) and any(k in haystack for k in ['hoc phi', 'le phi', 'muc thu']):
+                score += 4
+            if 'noi dung' in q_fold:
+                score += max(0, 2 - idx)
+
+            scored_sections.append((score, idx, sec))
+
+        scored_sections.sort(key=lambda item: (-item[0], item[1]))
+        selected = [sec for _, _, sec in scored_sections[:4]] if scored_sections else sections[:4]
+
+        header = ''
+        for raw in context_text.split('\n'):
+            t = raw.strip()
+            if t.startswith('[') and t.endswith(']'):
+                header = t.strip('[]')
+                break
+
+        lines: List[str] = []
+        if header:
+            lines.append(f'**{header}**')
+            lines.append('')
+
+        normalized_query = self._normalize_text(query).strip()
+        lines.append(f'**N\u1ed9i dung ch\u00ednh theo y\u00eau c\u1ea7u:** {normalized_query}')
+        lines.append('')
+
+        for sec in selected:
+            title = sec.get('title', '').strip()
+            items = sec.get('items', [])
+            if not title or not items:
+                continue
+            lines.append(f'**{title}:**')
+            for item in items[:6]:
+                lines.append(f'- {item}')
+            lines.append('')
+
+        query_needs_table = any(k in q_fold for k in ['hoc phi', 'le phi', 'muc thu', 'so tien', 'bang'])
+        if tables and (query_needs_table or len(selected) < 2):
+            chosen_table = tables[0]
+            if 'hoc phi' in q_fold:
+                for table in tables:
+                    tf = str(table.get('table_fold', ''))
+                    if any(k in tf for k in ['chuong trinh', 'khoa 11', 'tin chi', 'muc thu hoc phi']):
+                        chosen_table = table
+                        break
+            elif 'le phi' in q_fold:
+                for table in tables:
+                    tf = str(table.get('table_fold', ''))
+                    if any(k in tf for k in ['le phi', 'noi dung thu', 'tong cong']):
+                        chosen_table = table
+                        break
+
+            lines.append('**B\u1ea3ng d\u1eef li\u1ec7u li\u00ean quan:**')
+            lines.append('')
+            lines.extend(self._render_compact_markdown_table(chosen_table['headers'], chosen_table['rows']))
+            lines.append('')
+
+        rebuilt = '\n'.join(lines).strip()
+        if len(rebuilt) < 120:
+            return None
+        return rebuilt
+
+    def _enrich_document_info_response(self, response: str, context_text: str, query: str) -> str:
+        """Generalized post-processing: rebuild answer from sections/tables when LLM output is partial."""
+        if not response or not context_text:
+            return response
+
+        generic = self._build_generic_document_outline(query, context_text)
+        if not generic:
+            return response
+
+        folded_response = self._fold_for_match(response)
+        query_fold = self._fold_for_match(query)
+
+        # N?u LLM tr? l?i/no-data ng?n nh?ng context c? d? li?u th? tr? b?n outline t?ng qu?t.
+        if any(err in folded_response for err in ['xin loi', 'su co ket noi', 'khong tim thay thong tin']) and len(folded_response) < 240:
+            return generic
+
+        generic_titles = []
+        for line in generic.split('\n'):
+            m = re.match(r'^\*\*(.+?):\*\*$', line.strip())
+            if m:
+                generic_titles.append(m.group(1))
+
+        section_overlap = 0
+        for title in generic_titles[:5]:
+            if self._fold_for_match(title) in folded_response:
+                section_overlap += 1
+
+        context_money_count = len(re.findall(r'\d{1,3}(?:[\.,]\d{3})+', context_text))
+        response_money_count = len(re.findall(r'\d{1,3}(?:[\.,]\d{3})+', response))
+
+        if len(generic_titles) >= 3 and section_overlap <= 1:
+            return generic
+
+        if context_money_count >= 3 and response_money_count < 2:
+            return generic
+
+        if 'noi dung' in query_fold and len(response) < int(len(generic) * 0.55):
+            return generic
+
+        return response
 
     def _needs_document_search(self, query: str, history: List[str] = None) -> bool:
         """
@@ -1126,6 +1984,7 @@ Trả lời:"""
         
         for doc_id in top_doc_ids:
             all_doc_chunks = await self.vector_store.scroll_by_doc_id(doc_id)
+            all_doc_chunks = sorted(all_doc_chunks, key=self._chunk_order_key)
             added = 0
             for chunk in all_doc_chunks:
                 if added >= MAX_EXPANSION_PER_DOC:
@@ -1215,6 +2074,41 @@ Trả lời:"""
                 return True
         return False
 
+    def _apply_topic_guard(self, hits: List, query: str) -> List:
+        """
+        Guard against cross-topic false positives.
+        For strict topics (e.g. Tết/Nguyên đán), if no hit matches topic terms,
+        return empty list so system falls back to deterministic "no data" response.
+        """
+        if not hits:
+            return hits
+
+        q = self._normalize_text(query).lower()
+        topic_terms = self._extract_query_topic_terms(query)
+        if not topic_terms:
+            return hits
+
+        matched = []
+        for hit in hits:
+            payload = getattr(hit, 'payload', {}) or {}
+            haystack = ' '.join([
+                str(payload.get('title', '')),
+                str(payload.get('source', '')),
+                str(payload.get('content', '')),
+            ])
+            if self._topic_matches(haystack, topic_terms):
+                matched.append(hit)
+
+        if matched:
+            return matched
+
+        strict_topics = ['tết', 'nguyên đán']
+        if any(term in q for term in strict_topics):
+            print("[Topic Guard] Strict topic requested but no topic-matched hit found.")
+            return []
+
+        return hits
+
     def _apply_explicit_year_filter(self, hits: List, query: str) -> List:
         """Apply hard preference for explicit year/year-range in user query."""
         if not hits:
@@ -1289,6 +2183,14 @@ Trả lời:"""
 
         return hits
 
+    def _chunk_order_key(self, hit) -> Tuple[int, str]:
+        payload = getattr(hit, 'payload', {}) or {}
+        chunk_id = str(payload.get('chunk_id', ''))
+        m = re.search(r'(\d+)$', chunk_id)
+        if m:
+            return int(m.group(1)), chunk_id
+        return 10**9, chunk_id
+
     def _focus_on_primary_document(self, hits: List) -> List:
         """Keep chunks from the dominant doc_id to avoid mixing unrelated documents."""
         if not hits:
@@ -1309,6 +2211,7 @@ Trả lời:"""
 
         primary_doc = max(doc_stats.items(), key=lambda item: (item[1]['count'], item[1]['best_score']))[0]
         focused = [h for h in hits if h.payload.get('doc_id') == primary_doc]
+        focused = sorted(focused, key=self._chunk_order_key)
         print(f"🎯 [Doc Focus] Keep doc_id={primary_doc}: {len(focused)}/{len(hits)} chunks")
         return focused if focused else hits
 
@@ -1504,7 +2407,8 @@ Trả lời:"""
         # Flatten: giữ thứ tự ưu tiên nhưng nhóm liền các chunk cùng doc
         grouped_hits = []
         for doc_id, hits in doc_groups.items():
-            grouped_hits.extend(hits)
+            hits_sorted = sorted(hits, key=self._chunk_order_key)
+            grouped_hits.extend(hits_sorted)
 
         for hit in grouped_hits:
             if current_length >= MAX_CONTEXT_LENGTH:
@@ -2001,6 +2905,13 @@ Tóm tắt:"""
                 {"key": "scope", "match": {"value": "public"}},  # Key thay thế
             ]
         }
+
+
+
+
+
+
+
 
 
 

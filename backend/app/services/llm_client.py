@@ -161,7 +161,7 @@ class LLMClient:
         
         # Dọn dẹp nhiều khoảng trắng và dấu phẩy
         cleaned = re.sub(r'\s*,\s*,\s*', ', ', cleaned)
-        cleaned = re.sub(r'\s+', ' ', cleaned)
+        cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)
         return cleaned.strip() if cleaned.strip() else response
 
     async def rewrite_query(self, query: str, history: List[str]) -> str:
@@ -219,3 +219,4 @@ Câu hỏi hoàn chỉnh:"""
         # Sử dụng pre-compiled pattern
         cleaned = self._cyrillic_cjk_pattern.sub('', result)
         return cleaned.strip() if cleaned.strip() else query
+
