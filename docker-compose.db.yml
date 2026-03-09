@@ -1,0 +1,46 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: unimind-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: '123!@#'
+      POSTGRES_DB: unimind
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - unimind-network
+    restart: always
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: unimind-qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - unimind-network
+    restart: always
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: unimind-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - unimind-network
+    restart: always
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  ollama_data:
+
+networks:
+  unimind-network:
+    driver: bridge
