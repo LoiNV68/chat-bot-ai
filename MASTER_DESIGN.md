@@ -37,44 +37,67 @@ Biểu đồ dưới đây tách biệt rõ ràng giữa **Luồng Chạy Thật
 ```mermaid
 graph TD
     subgraph "Online Layer (Serving Users)"
-        User[Sinh viên/GV] -->|1. Chat Request| API[API Gateway]
-        API -->|2. Check Auth| Auth[Auth Service]
+        User[Sinh viên/GV] -->|"1. Chat Request"| API[API Gateway]
+        API -->|"2. Check Auth"| Auth[Auth Service]
 
         subgraph "RAG Inference Flow"
-            API -->|3. Rewrite Query| LLM_RW[Qwen Rewrite]
-            LLM_RW -->|4. Retrieve (Filter Time/Scope)| VectorDB[(Qdrant)]
-            VectorDB -->|5. Generate Answer| LLM_GEN[Qwen Generate]
+            API -->|"3. Rewrite Query"| LLM_RW[Qwen Rewrite]
+            LLM_RW -->|"4. Retrieve (Filter Time/Scope)"| VectorDB[(Qdrant)]
+            VectorDB -->|"5. Generate Answer"| LLM_GEN[Qwen Generate]
         end
 
-        LLM_GEN -->|6. Response + Citation| User
-        User -->|7. Feedback (Like/Dislike)| DB[(PostgreSQL)]
+        LLM_GEN -->|"6. Response + Citation"| User
+        User -->|"7. Feedback (Like/Dislike)"| DB[(PostgreSQL)]
     end
 
     subgraph "Offline Layer (Weekend Training)"
-        DB -->|8. Export Bad Cases| Expert[Giảng viên Review]
-        Expert -->|9. Correction| Dataset[(Golden Dataset)]
-        Dataset -->|10. Fine-tune (DPO/LoRA)| Trainer[Training Process]
-        Trainer -->|11. Update Adapter| LLM_GEN
+        DB -->|"8. Export Bad Cases"| Expert[Giảng viên Review]
+        Expert -->|"9. Correction"| Dataset[(Golden Dataset)]
+        Dataset -->|"10. Fine-tune (DPO/LoRA)"| Trainer[Training Process]
+        Trainer -->|"11. Update Adapter"| LLM_GEN
     end
-3. THIẾT KẾ CƠ SỞ DỮ LIỆU (DATABASE SCHEMA)
+```
+
+## 3. THIẾT KẾ CƠ SỞ DỮ LIỆU (DATABASE SCHEMA)
+
 Kết hợp tính năng Versioning, Security (v1.1) và Feedback Loop (v2.0).
 
-3.1. Relational DB (PostgreSQL)
-Table users
+### 3.1. Relational DB (PostgreSQL)
 
-id, username, password_hash, role
+**Table users**
+`id, username, password_hash, role`
 
-Table documents (Quản lý Version & Quyền hạn) | Column | Type | Description | | :--- | :--- | :--- | | id | Serial | PK | | filename | Varchar | Tên file | | version | Int | Phiên bản (1, 2...) | | is_active | Bool | Trạng thái hiện hành | | effective_date | Timestamp | Ngày hiệu lực | | expiry_date | Timestamp | Ngày hết hạn | | access_scope | Enum | 'public', 'private' (Bảo mật) | | target_id | Varchar | Mã SV/Lớp (nếu private) | | uploaded_by | FK | Giảng viên upload |
+**Table documents (Quản lý Version & Quyền hạn)**
 
-Table chat_history (Lịch sử Chat)
+| Column         | Type      | Description                   |
+| :------------- | :-------- | :---------------------------- |
+| id             | Serial    | PK                            |
+| filename       | Varchar   | Tên file                      |
+| version        | Int       | Phiên bản (1, 2...)           |
+| is_active      | Bool      | Trạng thái hiện hành          |
+| effective_date | Timestamp | Ngày hiệu lực                 |
+| expiry_date    | Timestamp | Ngày hết hạn                  |
+| access_scope   | Enum      | 'public', 'private' (Bảo mật) |
+| target_id      | Varchar   | Mã SV/Lớp (nếu private)       |
+| uploaded_by    | FK        | Giảng viên upload             |
 
-session_id (UUID), user_query, ai_response, created_at
+**Table chat_history (Lịch sử Chat)**
+`session_id (UUID), user_query, ai_response, created_at`
 
-Table feedback_loop (Dữ liệu Huấn luyện) | Column | Type | Description | | :--- | :--- | :--- | | id | Serial | PK | | chat_id | UUID | FK tới chat_history | | score | Int | 1 (Dislike) hoặc 5 (Like) | | rejected_response| Text | Câu trả lời AI sai (để train DPO) | | chosen_response | Text | Câu trả lời Giảng viên sửa lại (để train DPO) | | status | Varchar | 'pending', 'reviewed', 'trained' |
+**Table feedback_loop (Dữ liệu Huấn luyện)**
 
-3.2. Vector Payload (Qdrant)
-JSON
+| Column            | Type    | Description                                   |
+| :---------------- | :------ | :-------------------------------------------- |
+| id                | Serial  | PK                                            |
+| chat_id           | UUID    | FK tới chat_history                           |
+| score             | Int     | 1 (Dislike) hoặc 5 (Like)                     |
+| rejected_response | Text    | Câu trả lời AI sai (để train DPO)             |
+| chosen_response   | Text    | Câu trả lời Giảng viên sửa lại (để train DPO) |
+| status            | Varchar | 'pending', 'reviewed', 'trained'              |
 
+### 3.2. Vector Payload (Qdrant)
+
+```json
 {
   "source_id": 101,
   "content": "Quy chế đào tạo tín chỉ...",
@@ -83,75 +106,64 @@ JSON
     "is_current": true,
     "effective_date": "2024-01-01",
     "access_scope": "public",
-    "doc_type": "pdf_table" // Đánh dấu đây là bảng trích xuất từ PDF
+    "doc_type": "pdf_table"
   }
 }
-4. QUY TRÌNH XỬ LÝ DỮ LIỆU (DATA PIPELINES)
-4.1. Ingestion Pipeline (Nạp liệu Đa định dạng)
+```
+
+## 4. QUY TRÌNH XỬ LÝ DỮ LIỆU (DATA PIPELINES)
+
+### 4.1. Ingestion Pipeline (Nạp liệu Đa định dạng)
+
 Module xử lý đầu vào thông minh.
 
-Excel Processor:
+**Excel Processor**:
 
-Dùng openpyxl: Unmerge cells (gỡ ô gộp).
+- Dùng openpyxl: Unmerge cells (gỡ ô gộp).
+- Row-to-Text: Convert dòng thành câu văn.
 
-Row-to-Text: Convert dòng thành câu văn.
+**PDF Processor (Nâng cấp v2.0)**:
 
-PDF Processor (Nâng cấp v2.0):
+- Dùng PyMuPDF: Quét text kỹ lưỡng.
+- Bản scan OCR (Mới): Tự động phát hiện nếu file không thể đọc bằng chữ (bản scan) -> Gọi Tesseract/PaddleOCR qua WSL để quét ảnh.
+- Detect Table: Nếu phát hiện bảng -> Extract cấu trúc -> Giữ nguyên định dạng Markdown Table ghép với các dòng text xung quanh để AI hiểu bối cảnh (Context Merging).
+- Text thường: Cây phân cấp làm sạch nhiễu OCR (Sửa lỗi dính chữ) -> Cắt bằng RecursiveCharacterTextSplitter theo các ngữ cảnh Luật (`Điều`, `Khoản`) thay vì cắt cứng theo ký tự.
 
-Dùng PyMuPDF: Quét text kỹ lưỡng.
+**Indexing**:
 
-Bản scan OCR (Mới): Tự động phát hiện nếu file không thể đọc bằng chữ (bản scan) -> Gọi Tesseract/PaddleOCR qua WSL để quét ảnh.
+- Gắn Metadata: Time, Access Scope.
+- Vector hóa và lưu Qdrant.
 
-Detect Table: Nếu phát hiện bảng -> Extract cấu trúc -> Giữ nguyên định dạng Markdown Table ghép với các dòng text xung quanh để AI hiểu bối cảnh (Context Merging).
+### 4.2. Retrieval & Generation Pipeline
 
-Text thường: Cây phân cấp làm sạch nhiễu OCR (Sửa lỗi dính chữ) -> Cắt bằng RecursiveCharacterTextSplitter theo các ngữ cảnh Luật (`Điều`, `Khoản`) thay vì cắt cứng theo ký tự.
+- **Rewrite**: Viết lại câu hỏi user dựa trên lịch sử.
+- **Filter**: `is_current = True` (Mặc định).
+- **Retrieve & Sàng lọc**: Lấy Vector khớp nhất.
+  - **Year/Topic Guard (Mới)**: Tự động loại bỏ các tài liệu nếu khác năm học người dùng hỏi, đảm bảo độ chuẩn xác 100%.
+- **Generate Logic (Mới)**:
+  - **Bơm Rule Cứng (Deterministic Fallbacks)**: Với các nghiệp vụ phức tạp nhạy cảm như (Nghỉ Tết, Lệ Phí, Đối tượng miễn giảm học phí), hệ thống tự động bóc tách bằng Python Regex và chặn LLM trả lời "ảo giác".
+  - Nếu không tìm kiếm được sinh viên/văn bản sẽ bật **Kill-Switch** buộc trả về kết quả rỗng không bịa đặt.
+  - Chỉ khi dữ liệu chung chung, Qwen 2.5 mới tiếp quản Generate Answer + Trích dẫn nguồn.
 
-Indexing:
+## 5. CHIẾN LƯỢC HUẤN LUYỆN (OFFLINE TRAINING STRATEGY)
 
-Gắn Metadata: Time, Access Scope.
+_Lưu ý: Không chạy training khi đang phục vụ sinh viên._
 
-Vector hóa và lưu Qdrant.
+1. **Thu thập**: Sinh viên bấm Dislike -> Lưu vào `feedback_loop`.
+2. **Review (Human-in-the-loop)**: Cuối tuần, giảng viên vào Admin Dashboard, sửa lại câu trả lời sai -> Lưu vào cột `chosen_response`.
+3. **Training**:
+   - Khi có >100 mẫu dữ liệu đã sửa.
+   - Chạy script Fine-tuning (DPO) tạo ra file Adapter (`.gguf` hoặc `.safetensors`).
+4. **Update**: Load lại Ollama với Adapter mới vào sáng thứ 2.
 
-4.2. Retrieval & Generation Pipeline
-Rewrite: Viết lại câu hỏi user dựa trên lịch sử.
+## 6. FRONTEND DESIGN (REACT VITE)
 
-Filter:
+**Student Portal**:
 
-is_current = True (Mặc định).
+- Chat Interface (Streaming Text).
+- Nút Feedback (👍 / 👎) sau mỗi câu trả lời.
 
-Retrieve & Sàng lọc: Lấy Vector khớp nhất.
-- Year/Topic Guard (Mới): Tự động loại bỏ các tài liệu nếu khác năm học người dùng hỏi, đảm bảo độ chuẩn xác 100%.
+**Admin Portal**:
 
-Generate Logic (Mới):
-- **Bơm Rule Cứng (Deterministic Fallbacks)**: Với các nghiệp vụ phức tạp nhạy cảm như (Nghỉ Tết, Lệ Phí, Đối tượng miễn giảm học phí), hệ thống tự động bóc tách bằng Python Regex và chặn LLM trả lời "ảo giác".
-- Nếu không tìm kiếm được sinh viên/văn bản sẽ bật **Kill-Switch** buộc trả về kết quả rỗng không bịa đặt.
-- Chỉ khi dữ liệu chung chung, Qwen 2.5 mới tiếp quản Generate Answer + Trích dẫn nguồn.
-
-5. CHIẾN LƯỢC HUẤN LUYỆN (OFFLINE TRAINING STRATEGY)
-Lưu ý: Không chạy training khi đang phục vụ sinh viên.
-
-Thu thập: Sinh viên bấm Dislike -> Lưu vào feedback_loop.
-
-Review (Human-in-the-loop): Cuối tuần, giảng viên vào Admin Dashboard, sửa lại câu trả lời sai -> Lưu vào cột chosen_response.
-
-Training:
-
-Khi có >100 mẫu dữ liệu đã sửa.
-
-Chạy script Fine-tuning (DPO) tạo ra file Adapter (.gguf hoặc .safetensors).
-
-Update: Load lại Ollama với Adapter mới vào sáng thứ 2.
-
-6. FRONTEND DESIGN (REACT VITE)
-Student Portal:
-
-Chat Interface (Streaming Text).
-
-Nút Feedback (👍 / 👎) sau mỗi câu trả lời.
-
-Admin Portal:
-
-Document Management (Upload, Version History).
-
-Feedback Review UI: Giao diện cho giảng viên sửa câu trả lời sai của AI (So sánh Side-by-Side: Câu AI vs Câu sửa).
-```
+- Document Management (Upload, Version History).
+- Feedback Review UI: Giao diện cho giảng viên sửa câu trả lời sai của AI (So sánh Side-by-Side: Câu AI vs Câu sửa).
