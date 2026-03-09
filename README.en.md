@@ -29,7 +29,7 @@ _Built with the following tools and technologies:_
 </div>
 
 <div align="center">
-  <strong>[Tiếng Việt](README.md) | [English](README.en.md)</strong>
+  <strong><a href="README.md">Tiếng Việt</a> | <a href="README.en.md">English</a></strong>
 </div>
 
 ---
