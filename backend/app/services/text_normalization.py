@@ -124,6 +124,7 @@ def fold_text_for_search(text: str) -> str:
     base = normalize_unicode(text)
     decomp = unicodedata.normalize("NFKD", base)
     without_marks = "".join(ch for ch in decomp if not unicodedata.combining(ch))
+    without_marks = without_marks.replace("đ", "d").replace("Đ", "D")
     lowered = without_marks.lower()
     lowered = re.sub(r"[^0-9a-z]+", " ", lowered)
     return re.sub(r"\s+", " ", lowered).strip()

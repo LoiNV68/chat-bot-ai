@@ -227,10 +227,18 @@ class VectorStore:
 
             field_queries: list[tuple[str, str]] = [("content", keyword), ("title", keyword)]
             folded = fold_text_for_search(keyword)
-            if folded and folded != keyword.lower().strip():
+            if folded:
                 field_queries.append(("content_folded", folded))
 
-            for field_name, term in field_queries:
+            deduped_field_queries: list[tuple[str, str]] = []
+            seen_pairs: set[tuple[str, str]] = set()
+            for pair in field_queries:
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                deduped_field_queries.append(pair)
+
+            for field_name, term in deduped_field_queries:
                 try:
                     must_conditions = [models.FieldCondition(key=field_name, match=models.MatchText(text=term))]
 

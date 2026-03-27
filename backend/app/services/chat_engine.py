@@ -1,9 +1,10 @@
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 import re
 import datetime
 import unicodedata
 from collections import defaultdict
 from app.services.llm_client import LLMClient
+from app.services.text_normalization import fold_text_for_search
 from app.services.vector_store import VectorStore
 from app.models.user import User
 # from pyvi import ViTokenizer  # Removed: bge-m3 handles Vietnamese natively
@@ -129,6 +130,8 @@ class UserSession:
     def __init__(self):
         self.last_student_id = None
         self.last_student_name = None
+        self.pending_student_choices = []
+        self.pending_student_lookup_query = None
         self.last_topic = None
         # Conversation Summary Memory
         self.summary = ""           # Tóm tắt hội thoại cũ
@@ -200,6 +203,180 @@ class ChatEngine:
         ]
         return len(q.split()) <= 8 and any(kw in q for kw in personal_keywords)
 
+    def _match_pending_student_choice(self, query: str, session: UserSession) -> Tuple[Optional[str], Optional[str]]:
+        choices = session.pending_student_choices or []
+        if not choices:
+            return None, None
+
+        cleaned = self._normalize_text(query)
+        if not cleaned:
+            return None, None
+
+        student_ids = re.findall(r'\b(\d{10})\b', cleaned)
+        if student_ids:
+            target_id = student_ids[0]
+            for student_id, full_name in choices:
+                if student_id == target_id:
+                    return student_id, full_name
+
+        q_fold = fold_text_for_search(cleaned)
+        if not q_fold:
+            return None, None
+
+        q_tokens = [token for token in q_fold.split() if token]
+        matched = []
+        for student_id, full_name in choices:
+            full_name_folded = fold_text_for_search(full_name)
+            if not full_name_folded:
+                continue
+            if q_fold == full_name_folded or q_fold in full_name_folded:
+                matched.append((student_id, full_name))
+                continue
+            if q_tokens and all(token in full_name_folded for token in q_tokens):
+                matched.append((student_id, full_name))
+
+        if len(matched) == 1:
+            return matched[0]
+        return None, None
+
+    def _looks_like_student_selection_reply(self, query: str) -> bool:
+        cleaned = self._normalize_text(query)
+        if not cleaned:
+            return False
+        if re.fullmatch(r'\d{10}', cleaned):
+            return True
+        return self._looks_like_person_name(cleaned)
+
+    def _suggest_student_candidates(
+        self,
+        query: str,
+        candidates: List[Tuple[str, str]],
+        max_results: int = 5,
+    ) -> List[Tuple[str, str]]:
+        cleaned = self._normalize_text(query)
+        query_fold = fold_text_for_search(cleaned)
+        if not query_fold:
+            return []
+
+        query_tokens = [token for token in query_fold.split() if token]
+        if not query_tokens:
+            return []
+
+        unique_query_tokens = list(dict.fromkeys(query_tokens))
+        min_overlap = len(unique_query_tokens) if len(unique_query_tokens) <= 2 else len(unique_query_tokens) - 1
+
+        scored = []
+        seen = set()
+        for student_id, full_name in candidates:
+            key = (student_id, full_name)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            full_name_folded = fold_text_for_search(full_name)
+            if not full_name_folded:
+                continue
+
+            name_tokens = set(full_name_folded.split())
+            overlap = sum(1 for token in unique_query_tokens if token in name_tokens)
+            exact_fold_match = query_fold == full_name_folded
+            contains_match = query_fold in full_name_folded or full_name_folded in query_fold
+
+            if not exact_fold_match and not contains_match and overlap < min_overlap:
+                continue
+
+            scored.append((
+                1 if exact_fold_match else 0,
+                1 if contains_match else 0,
+                overlap,
+                -len(full_name_folded),
+                student_id,
+                full_name,
+            ))
+
+        scored.sort(reverse=True)
+        return [(student_id, full_name) for _, _, _, _, student_id, full_name in scored[:max_results]]
+
+    def _build_student_not_found_response(
+        self,
+        student_name: str,
+        suggestions: Optional[List[Tuple[str, str]]] = None,
+        pending_scope: bool = False,
+    ) -> str:
+        display_name = self._normalize_text(student_name).strip() or student_name.strip()
+        location = "trong danh sách vừa gợi ý" if pending_scope else "trong dữ liệu hiện có"
+        lines = [f"Mình chưa tìm thấy sinh viên **{display_name}** {location}."]
+
+        if suggestions:
+            lines.append("")
+            lines.append("Tên gần nhất mình thấy là:")
+            for student_id, full_name in suggestions:
+                lines.append(f"- **{full_name}** — MSV: `{student_id}`")
+            lines.append("")
+            lines.append("Bạn hãy nhập **mã sinh viên** hoặc **tên đầy đủ** trong danh sách trên để mình tra cứu chính xác.")
+        else:
+            lines.append("Bạn có thể kiểm tra lại **mã sinh viên** hoặc **cách viết họ tên** rồi gửi lại.")
+
+        return "\n".join(lines)
+
+    def _build_pending_student_query(self, session: UserSession, student_id: str) -> str:
+        base_query = self._normalize_text(session.pending_student_lookup_query or "")
+        base_fold = fold_text_for_search(base_query)
+
+        if any(keyword in base_fold for keyword in ['diem ren luyen', 'ren luyen']):
+            return f"Cho tôi biết điểm rèn luyện của sinh viên mã {student_id}"
+        if any(keyword in base_fold for keyword in ['diem thi', 'ket qua hoc tap']):
+            return f"Cho tôi biết kết quả học tập của sinh viên mã {student_id}"
+        if 'xep loai' in base_fold:
+            return f"Cho tôi biết xếp loại của sinh viên mã {student_id}"
+        return f"Cho tôi biết thông tin của sinh viên mã {student_id}"
+
+    def _extract_explicit_doc_number(self, folded_query: str) -> Optional[str]:
+        if not folded_query:
+            return None
+
+        patterns = [
+            r'\b(?:thong bao|tb|quyet dinh|qd|cong van|cv)\s*(?:so\s*)?[:.]?\s*([0-9A-Za-z/\-\.]*\d[0-9A-Za-z/\-\.]*)',
+            r'\bso\s*[:.]?\s*([0-9A-Za-z/\-\.]*\d[0-9A-Za-z/\-\.]*)',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, folded_query, flags=re.IGNORECASE)
+            if not match:
+                continue
+            candidate = match.group(1).strip(".,;: ")
+            if candidate:
+                return candidate
+        return None
+
+    def _rewrite_student_name_followup(self, query: str, history: List[str], session: UserSession) -> Optional[str]:
+        if not session.last_student_id and not session.last_student_name:
+            return None
+
+        cleaned = self._normalize_text(query)
+        folded = fold_text_for_search(cleaned)
+        if not folded:
+            return None
+
+        if len(folded.split()) > 8:
+            return None
+
+        followup_markers = ['con', 'cua', 'thi sao', 'the sao', 've']
+        if not any(marker in folded for marker in followup_markers):
+            return None
+
+        candidate_name = self._extract_person_name(cleaned)
+        if not candidate_name:
+            return None
+
+        history_fold = fold_text_for_search(" ".join(history or []))
+        if any(keyword in history_fold for keyword in ['diem ren luyen', 'ren luyen']):
+            return f"Cho tôi biết điểm rèn luyện của sinh viên {candidate_name}"
+        if any(keyword in history_fold for keyword in ['diem thi', 'ket qua hoc tap']):
+            return f"Cho tôi biết kết quả học tập của sinh viên {candidate_name}"
+        if 'xep loai' in history_fold:
+            return f"Cho tôi biết xếp loại của sinh viên {candidate_name}"
+        return f"Cho tôi biết thông tin của sinh viên {candidate_name}"
+
     # =================================================================
     # FIX 4: Query Intent Classifier — Phân loại câu hỏi thông minh
     # =================================================================
@@ -207,40 +384,44 @@ class ChatEngine:
         """Phân loại intent của câu hỏi để chọn chiến lược search phù hợp."""
         query = self._normalize_text(query)
         q = query.lower()
+        q_fold = fold_text_for_search(query)
         
         # ƯU TIÊN -1: Tra cứu văn bản cụ thể (vượt qua mọi keyword của sinh viên nếu người dùng dùng từ khóa quá rõ ràng)
-        if any(kw in q for kw in [
-            'nội dung của', 'nội dung quyết định', 'nội dung thông báo', 
-            'chi tiết quyết định', 'chi tiết thông báo', 'cho tôi xin văn bản',
-            'cho tôi xem văn bản', 'đọc quyết định'
+        if any(kw in q_fold for kw in [
+            'noi dung cua', 'noi dung quyet dinh', 'noi dung thong bao',
+            'chi tiet quyet dinh', 'chi tiet thong bao', 'cho toi xin van ban',
+            'cho toi xem van ban', 'doc quyet dinh'
         ]):
             return 'document_info'
 
         # ƯU TIÊN 0: Tra cứu sinh viên cụ thể (MSV hoặc keyword đặc trưng)
         # PHẢI CHECK TRƯỚC document_info vì "cho tôi biết về điểm của Lợi" = student_lookup
-        if re.search(r'\b\d{10}\b', query) or any(kw in q for kw in [
-            'điểm của', 'msv', 'mã sinh viên',
-            'xếp loại của', 'kết quả học tập của'
+        if re.search(r'\b\d{10}\b', query) or any(kw in q_fold for kw in [
+            'diem cua', 'msv', 'ma sinh vien',
+            'xep loai cua', 'ket qua hoc tap cua'
         ]):
             return 'student_lookup'
         
         # ƯU TIÊN 0.5: Hỏi điểm + có tên người → student_lookup (kể cả khi có "cho tôi biết về")
-        if any(kw in q for kw in ['điểm rèn luyện', 'điểm thi', 'điểm của']):
+        if any(kw in q_fold for kw in ['diem ren luyen', 'diem thi', 'diem cua']):
             name = self._extract_person_name(query)
             if name:
                 return 'student_lookup'
         
         # ƯU TIÊN 1: Hỏi VỀ thông báo/quyết định/văn bản
         # VD: "thông báo về điểm rèn luyện" → document_info (không có tên người)
-        if any(kw in q for kw in [
-            'thông báo', 'quyết định', 'công văn', 'văn bản', 'kế hoạch',
-            'nội dung', 'cho biết về', 'cho tôi biết về'
+        if any(kw in q_fold for kw in [
+            'thong bao', 'quyet dinh', 'cong van', 'van ban', 'ke hoach',
+            'noi dung', 'cho biet ve', 'cho toi biet ve'
         ]):
+            return 'document_info'
+
+        if any(kw in q_fold for kw in ['tet', 'nguyen dan', 'binh ngo']):
             return 'document_info'
         
         # FIX C: Hỏi điểm + có tên người → student_lookup (không phải score_general)
         # VD: "điểm rèn luyện của Lợi" → student_lookup
-        if any(kw in q for kw in ['điểm rèn luyện', 'điểm thi', 'điểm của']):
+        if any(kw in q_fold for kw in ['diem ren luyen', 'diem thi', 'diem cua']):
             # Kiểm tra có tên riêng không (từ viết hoa không phải stopword)
             name = self._extract_person_name(query)
             if name:
@@ -248,23 +429,23 @@ class ChatEngine:
             return 'score_general'
         
         # Hỏi về lịch, thời gian, deadline
-        if any(kw in q for kw in [
-            'khi nào', 'bao giờ', 'lịch', 'deadline', 'hạn',
-            'thời gian', 'ngày', 'tháng'
+        if any(kw in q_fold for kw in [
+            'khi nao', 'bao gio', 'lich', 'deadline', 'han',
+            'thoi gian', 'ngay', 'thang'
         ]):
             return 'schedule'
         
         # Hỏi quy định, quy trình, thủ tục
-        if any(kw in q for kw in [
-            'quy định', 'quy trình', 'thủ tục', 'cách', 'làm sao',
-            'hướng dẫn', 'điều kiện', 'yêu cầu'
+        if any(kw in q_fold for kw in [
+            'quy dinh', 'quy trinh', 'thu tuc', 'cach', 'lam sao',
+            'huong dan', 'dieu kien', 'yeu cau'
         ]):
             return 'regulation'
         
         # Hỏi về phòng thi, thi cử
-        if any(kw in q for kw in [
-            'phòng thi', 'lịch thi', 'toeic', 'thi',
-            'ca thi', 'địa điểm thi'
+        if any(kw in q_fold for kw in [
+            'phong thi', 'lich thi', 'toeic', 'thi',
+            'ca thi', 'dia diem thi'
         ]):
             return 'exam'
         
@@ -286,6 +467,26 @@ class ChatEngine:
 
         # === Build effective_history từ session memory (thay vì dùng history thô) ===
         effective_history = self._build_context_history(session)
+
+        # === Resolve lựa chọn sinh viên đang chờ làm rõ (tên đầy đủ hoặc MSV) ===
+        pending_student_id, pending_student_name = self._match_pending_student_choice(user_query, session)
+        if pending_student_id and pending_student_name:
+            session.last_student_id = pending_student_id
+            session.last_student_name = pending_student_name
+            session.pending_student_choices = []
+            user_query = self._build_pending_student_query(session, pending_student_id)
+            session.pending_student_lookup_query = None
+            print(
+                f"🧭 [Pending Student] '{pending_student_name}' -> MSV {pending_student_id}; rewritten query: {user_query}"
+            )
+        elif session.pending_student_choices and self._looks_like_student_selection_reply(user_query):
+            suggestions = self._suggest_student_candidates(user_query, session.pending_student_choices)
+            response = self._build_student_not_found_response(
+                user_query,
+                suggestions=suggestions,
+                pending_scope=True,
+            )
+            return {'answer': response, 'sources': [], 'has_related_docs': False}
         
         # === Detect user chỉ gửi chuỗi số (VD: MSV sau khi bot hỏi) ===
         pure_number_match = re.match(r'^\s*(\d+)\s*$', user_query.strip())
@@ -356,7 +557,12 @@ CHỈ trả về câu hỏi hoàn chỉnh, không giải thích."""
             user_query = user_query_with_topic
         
         # Bước 3: Viết lại Query để truy xuất tốt hơn
-        refined_query = await self.llm.rewrite_query(user_query, effective_history)
+        deterministic_student_followup = self._rewrite_student_name_followup(user_query, effective_history, session)
+        if deterministic_student_followup:
+            refined_query = deterministic_student_followup
+            print(f"[DEBUG] Deterministic student follow-up rewrite: {refined_query}")
+        else:
+            refined_query = await self.llm.rewrite_query(user_query, effective_history)
         print(f"[DEBUG] Refined query: {refined_query}")
         
         # Bước 3: Xây dựng Security Filter
@@ -408,12 +614,17 @@ CHỈ trả về câu hỏi hoàn chỉnh, không giải thích."""
         target_id = None
         ambiguous_name_to_ask = None
         lookup_results = []
+        explicit_student_name_not_found = None
+        explicit_doc_type = None
+        explicit_doc_number = None
 
         if should_apply_student_router and student_ids:
             # Có MSV rõ ràng → luôn dùng MSV mới
             target_id = student_ids[0]
             session.last_student_id = target_id
             session.last_student_name = None
+            session.pending_student_choices = []
+            session.pending_student_lookup_query = None
             print(f"🎯 [Memory] Lưu Mã SV MỚI: {target_id}")
         elif should_apply_student_router:
             # Không có MSV → kiểm tra xem có tên người mới không (Dùng refined_query để bắt đúng tên thật đã viết hoa & full intent từ AI)
@@ -442,6 +653,8 @@ CHỈ trả về câu hỏi hoàn chỉnh, không giải thích."""
                         print(f"✨ [Pre-Lookup] Tự động gán MSV {target_id} cho '{new_name_in_query}'")
                     elif len(lookup_results) > 1:
                         ambiguous_name_to_ask = new_name_in_query
+                    elif len(new_name_in_query.split()) >= 2:
+                        explicit_student_name_not_found = new_name_in_query
                         
                 else:
                     # Cùng người → dùng MSV cũ
@@ -461,6 +674,8 @@ CHỈ trả về câu hỏi hoàn chỉnh, không giải thích."""
                     print(f"✨ [Pre-Lookup] Tự động gán MSV {target_id} cho '{new_name_in_query}'")
                 elif len(lookup_results) > 1:
                     ambiguous_name_to_ask = new_name_in_query
+                elif len(new_name_in_query.split()) >= 2:
+                    explicit_student_name_not_found = new_name_in_query
             
             elif not new_name_in_query and session.last_student_id:
                 # Không có tên mới → câu follow-up thực sự?
@@ -474,11 +689,13 @@ CHỈ trả về câu hỏi hoàn chỉnh, không giải thích."""
         # [NEW] Trả lời luôn nếu tìm ra NHIỀU người (mơ hồ) TỪ TRƯỚC KHI SEARCH
         if ambiguous_name_to_ask:
             session.last_student_name = ambiguous_name_to_ask
+            session.pending_student_choices = lookup_results[:]
+            session.pending_student_lookup_query = refined_query
             
             lines = [f"Mình tìm thấy **{len(lookup_results)} sinh viên** có tên chứa \"{ambiguous_name_to_ask}\", bạn muốn hỏi về ai?\n"]
             for msv, f_name in lookup_results:
                 lines.append(f"- **{f_name}** — MSV: `{msv}`")
-            lines.append("\nBạn hãy nhập **mã sinh viên** để mình tìm chính xác nhé!")
+            lines.append("\nBạn hãy nhập **mã sinh viên** hoặc **tên đầy đủ** để mình tìm chính xác nhé!")
             
             clarification = "\n".join(lines)
             return {
@@ -489,6 +706,8 @@ CHỈ trả về câu hỏi hoàn chỉnh, không giải thích."""
 
         # NẾU XÁC ĐỊNH ĐƯỢC ĐỐI TƯỢNG (Mới hoặc Cũ), ÁP DỤNG FILTER CỨNG
         if target_id:
+            session.pending_student_choices = []
+            session.pending_student_lookup_query = None
             if 'must' not in enhanced_filters:
                 enhanced_filters['must'] = []
                 
@@ -522,23 +741,44 @@ CHỈ trả về câu hỏi hoàn chỉnh, không giải thích."""
         if query_intent == 'student_lookup' and not target_id:
             # Tra cứu SV theo tên → ưu tiên keyword search
             search_strategy = 'keyword' if tokenized_kw else 'hybrid'
-            
-            # QUAN TRỌNG: Nếu đang tra bằng tên (không có target_id - mã sinh viên được xác nhận)
-            # Không được cho phép tải danh sách lớp ngẫu nhiên vào context vì BM25 sẽ "ghép" các
-            # thành phần tên rời rạc từ các sinh viên khác nhau trong cùng 1 lớp (vd: Nguyễn A, Lê B Nam -> Nguyễn Nam)
-            # Việc này dẫn đến LLM bị ảo giác báo sinh viên ở lớp đó
-            if 'must_not' not in enhanced_filters:
-                enhanced_filters['must_not'] = []
-            enhanced_filters['must_not'].append({
-                'key': 'content_type',
-                'match': {'any': ['student_list', 'excel_table']}
-            })
-            print("🎯 [Intent] student_lookup (no MSV) → loại bỏ student_list + excel_table để tránh trộn tên")
+
+            score_lookup_keywords = ['điểm rèn luyện', 'điểm thi', 'điểm của', 'xếp loại', 'kết quả học tập']
+            if any(kw in self._normalize_text(tokenized_query).lower() for kw in score_lookup_keywords):
+                if 'must' not in enhanced_filters:
+                    enhanced_filters['must'] = []
+                enhanced_filters['must'].append({
+                    'key': 'content_type',
+                    'match': {'any': ['student_list', 'excel_table']}
+                })
+                print("🎯 [Intent] student_lookup (no MSV) → ưu tiên student_list + excel_table để tra cứu điểm")
             
         elif query_intent == 'document_info' and not target_id:
             # Hỏi VỀ thông báo/quyết định → ưu tiên hybrid + lọc bỏ bảng điểm
             # CHỈ lọc khi KHÔNG có target_id (nếu có target_id = đang tra cứu SV cụ thể)
             search_strategy = 'hybrid' if tokenized_kw else 'semantic'
+
+            folded_query = fold_text_for_search(tokenized_query)
+            if re.search(r'\b(thong bao|tb)\b', folded_query):
+                explicit_doc_type = 'Thông_báo'
+            elif re.search(r'\b(quyet dinh|qd)\b', folded_query):
+                explicit_doc_type = 'Quyết_định'
+            elif re.search(r'\b(cong van|cv)\b', folded_query):
+                explicit_doc_type = 'Công_văn'
+
+            explicit_doc_number = self._extract_explicit_doc_number(folded_query)
+
+            if explicit_doc_type or explicit_doc_number:
+                if 'must' not in enhanced_filters:
+                    enhanced_filters['must'] = []
+                if explicit_doc_type and explicit_doc_number:
+                    enhanced_filters['must'].append({
+                        'key': 'doc_type',
+                        'match': {'value': explicit_doc_type}
+                    })
+                print(
+                    f"🎯 [Intent] document_info → explicit doc filter type={explicit_doc_type} number={explicit_doc_number}"
+                )
+
             # QUAN TRỌNG: Filter bỏ chunks bảng điểm (student_list) — chỉ lấy text
             if 'must_not' not in enhanced_filters:
                 enhanced_filters['must_not'] = []
@@ -571,6 +811,17 @@ CHỈ trả về câu hỏi hoàn chỉnh, không giải thích."""
                 limit=SEARCH_LIMIT, 
                 filter_dict=enhanced_filters
             )
+
+        if explicit_doc_number and search_results:
+            explicit_number_hits = [
+                hit for hit in search_results
+                if self._hit_matches_explicit_doc_number(hit, explicit_doc_number)
+            ]
+            if explicit_number_hits:
+                print(
+                    f"🎯 [Intent] explicit doc number={explicit_doc_number} → keep {len(explicit_number_hits)}/{len(search_results)} hits"
+                )
+                search_results = explicit_number_hits
 
         # Fallback: if semantic has no hits, retry keyword search
         if not search_results and search_strategy == 'semantic' and tokenized_kw:
@@ -610,6 +861,7 @@ CHỈ trả về câu hỏi hoàn chỉnh, không giải thích."""
         if query_intent != 'student_lookup':
             valid_hits = self._apply_explicit_year_filter(valid_hits, user_query)
             valid_hits = self._apply_topic_guard(valid_hits, user_query)
+            valid_hits = self._apply_phrase_anchor_guard(valid_hits, user_query)
         
         # TOP-K ĐỘNG: Văn bản dài (quy định, thông báo) cần nhiều chunks hơn
         if query_intent in ('document_info', 'regulation'):
@@ -632,11 +884,31 @@ CHỈ trả về câu hỏi hoàn chỉnh, không giải thích."""
         if valid_hits and query_intent == 'document_info':
             valid_hits = self._focus_on_primary_document(valid_hits)
         
+        if query_intent == 'student_lookup' and explicit_student_name_not_found and not target_id:
+            candidates = self._collect_all_student_matches_from_hits(valid_hits)
+            suggestions = self._suggest_student_candidates(explicit_student_name_not_found, candidates)
+            session.last_student_name = explicit_student_name_not_found
+            session.pending_student_choices = suggestions[:]
+            session.pending_student_lookup_query = refined_query if suggestions else None
+            not_found = self._build_student_not_found_response(
+                explicit_student_name_not_found,
+                suggestions=suggestions,
+                pending_scope=False,
+            )
+            return {
+                'answer': not_found,
+                'sources': [],
+                'has_related_docs': False
+            }
+
         # === FIX 1: Phát hiện tên người mơ hồ (không có MSV) ===
         if query_intent == 'student_lookup' and not target_id:  # Chỉ check khi KHÔNG có MSV
             ambiguous_name = self._detect_ambiguous_name(user_query, valid_hits)
             if ambiguous_name:
+                matched_students = self._collect_student_matches_from_hits(ambiguous_name, valid_hits)
                 session.last_student_name = ambiguous_name  # Lưu tên đang hỏi
+                session.pending_student_choices = matched_students[:]
+                session.pending_student_lookup_query = refined_query
                 clarification = self._build_clarification_response(ambiguous_name, valid_hits)
                 return {
                     'answer': clarification,
@@ -725,6 +997,15 @@ CHỈ trả về câu hỏi hoàn chỉnh, không giải thích."""
             }
         
         
+        deterministic_mien_giam_notice_answer = self._build_mien_giam_notice_answer_v2(refined_query, context_text)
+        if deterministic_mien_giam_notice_answer:
+            await self._update_session_memory(session, user_query, deterministic_mien_giam_notice_answer)
+            return {
+                'answer': deterministic_mien_giam_notice_answer,
+                'sources': [],
+                'has_related_docs': has_related_docs
+            }
+
         deterministic_mien_giam_answer = self._build_mien_giam_subject_answer(refined_query, context_text)
         if deterministic_mien_giam_answer:
             await self._update_session_memory(session, user_query, deterministic_mien_giam_answer)
@@ -734,7 +1015,7 @@ CHỈ trả về câu hỏi hoàn chỉnh, không giải thích."""
                 'has_related_docs': has_related_docs
             }
 
-        deterministic_fee_answer = self._build_fee_notice_answer(refined_query, context_text)
+        deterministic_fee_answer = self._build_fee_notice_answer_v2(refined_query, context_text)
         if deterministic_fee_answer:
             await self._update_session_memory(session, user_query, deterministic_fee_answer)
             return {
@@ -780,6 +1061,7 @@ TRẢ LỜI (Nếu có bảng, hãy dùng cú pháp Markdown Table như | Cột 
         if "<table>" in context_text:
             print("[DEBUG] <table> tag DETECTED in context! The LLM should render a Markdown table.")
 
+        forced_no_data_response = False
         response = await self.llm.generate_response(prompt)
         
         print(f"\n[DEBUG] LLM Raw Response snippet: {response[:200]}...\n")
@@ -790,8 +1072,9 @@ TRẢ LỜI (Nếu có bảng, hãy dùng cú pháp Markdown Table như | Cột 
             sources = []
             self._cached_sources[session_key] = []
             has_related_docs = False
+            forced_no_data_response = True
 
-        if query_intent == 'document_info':
+        if query_intent == 'document_info' and not forced_no_data_response:
             response = self._suppress_placeholder_tables(response)
             response = self._enrich_document_info_response(response, context_text, refined_query)
 
@@ -800,7 +1083,7 @@ TRẢ LỜI (Nếu có bảng, hãy dùng cú pháp Markdown Table như | Cột 
         
         # Lưu topic vào session cho follow-up (lấy từ hit đầu tiên, TRỪ KHI đang tra cứu sinh viên)
         # Vì nếu tra cứu sinh viên, chủ đề chính là sinh viên chứ không phải văn bản chứa tên họ.
-        if valid_hits and query_intent != 'student_lookup':
+        if valid_hits and query_intent != 'student_lookup' and not forced_no_data_response:
             top_title = valid_hits[0].payload.get('title', '')
             top_doc_number = valid_hits[0].payload.get('doc_number', '')
             if top_title and top_title != 'Không xác định':
@@ -923,6 +1206,160 @@ Hãy trả lời CHỈ bằng đúng 1 từ: "TRUE" hoặc "FALSE"."""
         ]
         hit_count = sum(1 for c in checks if c in folded)
         return hit_count >= 2
+
+    def _build_mien_giam_notice_answer_v2(self, query: str, context_text: str) -> str | None:
+        """Deterministic summary for the tuition exemption/reduction notice."""
+        if not query or not context_text:
+            return None
+
+        q_fold = self._fold_for_match(query)
+        if 'mien giam hoc phi' not in q_fold:
+            return None
+
+        ask_detail = any(token in q_fold for token in [
+            'noi dung', 'chi tiet', 'thong bao', 'thong tin', 'cho toi biet', 'cho biet'
+        ])
+        ask_subject_only = 'doi tuong' in q_fold and any(token in q_fold for token in ['la ai', 'la gi', 'doi tuong nao'])
+        if not ask_detail or ask_subject_only:
+            return None
+
+        raw_ctx = unicodedata.normalize("NFC", context_text)
+        raw_lines = [line.strip() for line in raw_ctx.splitlines()]
+        header_lines = [line for line in raw_lines if re.fullmatch(r'\[.*\]', line)]
+        selected_header = header_lines[0][1:-1].strip() if header_lines else ''
+        working_lines = [
+            line for line in raw_lines
+            if line and line != '---' and not re.fullmatch(r'\[.*\]', line)
+        ]
+        working_ctx = '\n'.join(working_lines).strip()
+        compact_fold = self._fold_for_match(working_ctx)
+
+        if 'nghi dinh so 238 2025' not in compact_fold and 'mien giam hoc phi' not in compact_fold:
+            return None
+
+        title = 'THÔNG BÁO về xét duyệt miễn, giảm học phí'
+        so = ''
+        ngay = ''
+        if selected_header:
+            for part in selected_header.split('|'):
+                part_norm = self._normalize_text(part).strip()
+                if ':' not in part_norm:
+                    continue
+                value = part_norm.split(':', 1)[1].strip()
+                part_fold = self._fold_for_match(part_norm)
+                if part_fold.startswith('van ban') and value:
+                    title = value
+                elif part_fold.startswith('so') and value:
+                    so = value
+                elif part_fold.startswith('ngay') and value:
+                    ngay = value
+
+        def _has(marker: str) -> bool:
+            return marker in compact_fold
+
+        normalized_working = unicodedata.normalize("NFC", working_ctx)
+        time_range = ''
+        time_match = re.search(
+            r'Từ ngày\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})\s*đến ngày\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})',
+            normalized_working,
+            flags=re.IGNORECASE,
+        )
+        if time_match:
+            time_range = f"{time_match.group(1)} - {time_match.group(2)}"
+        else:
+            time_match = re.search(
+                r'tu ngay\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})\s*den ngay\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})',
+                compact_fold,
+            )
+            if time_match:
+                time_range = f"{time_match.group(1)} - {time_match.group(2)}"
+
+        institute_deadline = ''
+        institute_deadline_match = re.search(
+            r'17h00\s*ngày\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})',
+            normalized_working,
+            flags=re.IGNORECASE,
+        )
+        if institute_deadline_match:
+            institute_deadline = institute_deadline_match.group(1)
+
+        phone = ''
+        phone_match = re.search(r'\b0\d{9,10}\b', working_ctx)
+        if phone_match:
+            phone = phone_match.group(0)
+
+        lines = [f'**{title}**', '']
+        meta = []
+        if so:
+            meta.append(f'**Số:** {so}')
+        if ngay:
+            meta.append(f'**Ngày:** {ngay}')
+        if meta:
+            lines.append(' | '.join(meta))
+            lines.append('')
+
+        lines.append('**Nội dung chính:**')
+        lines.append('- Thông báo này hướng dẫn xét duyệt danh sách sinh viên thuộc diện được Nhà nước chi trả tiền miễn, giảm học phí cho **học kỳ II năm học 2025-2026** theo **Nghị định 238/2025/NĐ-CP**.')
+        lines.append('- Trọng tâm của văn bản là yêu cầu sinh viên chuẩn bị và nộp hồ sơ đúng đối tượng, đúng thời hạn; phần cuối văn bản có kèm **Phụ lục IV** là mẫu đơn đề nghị.')
+        lines.append('')
+
+        if _has('da duoc hieu truong phe duyet danh sach') or _has('khong can bo sung ho so'):
+            lines.append('**1. Sinh viên đã được phê duyệt ở học kỳ I/2025-2026:**')
+            if _has('dan toc thieu so thuoc ho ngheo') or _has('can ngheo nam 2026'):
+                lines.append('- Sinh viên là người dân tộc thiểu số thuộc hộ nghèo/cận nghèo hoặc cư trú tại khu vực đặc biệt khó khăn phải **nộp bổ sung giấy chứng nhận hộ nghèo/cận nghèo năm 2026**.')
+            if _has('khong can bo sung ho so'):
+                lines.append('- Các đối tượng khác đã được phê duyệt trước đó **không cần bổ sung hồ sơ**.')
+            lines.append('')
+
+        lines.append('**2. Sinh viên chưa được phê duyệt nhưng muốn xét bổ sung kỳ I-II/2025-2026:**')
+        lines.append('- Cần nộp hồ sơ theo đúng nhóm đối tượng được quy định trong thông báo; từ nội dung hiện có có thể xác định các nhóm chính sau.')
+        subject_rows = []
+        if _has('nguoi co cong'):
+            subject_rows.append('- Người có công với cách mạng đang theo học tại cơ sở giáo dục thuộc hệ thống giáo dục quốc dân: **mức hỗ trợ 100%**.')
+        if _has('sinh vien khuyet tat'):
+            subject_rows.append('- Sinh viên khuyết tật: **mức hỗ trợ 100%**.')
+        if _has('tro cap xa hoi hang thang'):
+            subject_rows.append('- Người học từ 16 đến 22 tuổi học văn bằng thứ nhất và đang hưởng trợ cấp xã hội hằng tháng: **mức hỗ trợ 100%**.')
+        if _has('dan toc thieu so co cha') or _has('hoac me hoac ca cha va me'):
+            subject_rows.append('- Sinh viên dân tộc thiểu số có cha/mẹ hoặc ông bà thuộc hộ nghèo/cận nghèo: **mức hỗ trợ 100%**.')
+        if _has('dan toc thieu so rat it nguoi'):
+            subject_rows.append('- Sinh viên dân tộc thiểu số rất ít người, cư trú tại vùng có điều kiện kinh tế - xã hội khó khăn hoặc đặc biệt khó khăn: **mức hỗ trợ 100%**.')
+        if _has('ngoai doi tuong la dan toc thieu so rat it nguoi') or _has('ngoai doi tuong dan toc thieu so rat it nguoi'):
+            subject_rows.append('- Sinh viên dân tộc thiểu số không thuộc nhóm rất ít người nhưng có nơi thường trú tại khu vực đặc biệt khó khăn: **mức hỗ trợ 70%**.')
+        elif _has('dan toc thieu so') and _has('70'):
+            subject_rows.append('- Một nhóm sinh viên dân tộc thiểu số có nơi thường trú tại khu vực đặc biệt khó khăn được thể hiện với **mức hỗ trợ 70%**.')
+        if _has('con can bo cong chuc') or _has('tai nan lao dong') or _has('benh nghe nghiep'):
+            subject_rows.append('- Sinh viên là con cán bộ, công chức, viên chức, công nhân mà cha/mẹ bị tai nạn lao động hoặc mắc bệnh nghề nghiệp được hưởng trợ cấp thường xuyên: **mức hỗ trợ 50%**.')
+        if subject_rows:
+            lines.extend(subject_rows)
+        lines.append('- Hồ sơ thường bao gồm **đơn đề nghị theo Phụ lục IV** và giấy tờ chứng minh tương ứng với từng nhóm đối tượng.')
+        lines.append('')
+
+        if time_range or _has('dia diem nop') or _has('31 dich vong hau') or _has('me linh'):
+            lines.append('**3. Thời hạn và địa điểm nộp hồ sơ:**')
+            if time_range:
+                lines.append(f'- Thời gian nhận hồ sơ: **{time_range}**.')
+            if _has('31 dich vong hau'):
+                lines.append('- Sinh viên khóa **11, 12, 13** nộp trực tiếp tại các Viện chuyên ngành quản lý sinh viên ở **31 Dịch Vọng Hậu, Cầu Giấy, Hà Nội**.')
+            if _has('me linh'):
+                lines.append('- Sinh viên khóa **14** nộp tại các Viện chuyên ngành ở **Tầng 2 Tòa Hiệu bộ, Trụ sở chính, Xã Mê Linh, Hà Nội**.')
+            if institute_deadline:
+                lines.append(f'- Văn phòng Viện tổng hợp và gửi về Phòng CTSV&PVCĐ trước **17h00 ngày {institute_deadline}**.')
+            lines.append('')
+
+        if _has('ho so nop muon hoac thieu se khong duoc giai quyet') or phone:
+            lines.append('**4. Lưu ý:**')
+            if _has('ho so nop muon hoac thieu se khong duoc giai quyet'):
+                lines.append('- Hồ sơ nộp muộn hoặc thiếu sẽ **không được giải quyết**.')
+            elif _has('nop muon hoac thieu'):
+                lines.append('- Hồ sơ nộp muộn hoặc thiếu sẽ **không được giải quyết**.')
+            if _has('chiu trach nhiem ve tinh chinh xac'):
+                lines.append('- Sinh viên phải **chịu trách nhiệm về tính chính xác** của giấy tờ nộp kèm.')
+            if phone:
+                lines.append(f'- Liên hệ Phòng Công tác Sinh viên và Phục vụ cộng đồng: **{phone}**.')
+
+        return '\n'.join(lines).strip()
+
     def _build_mien_giam_subject_answer(self, query: str, context_text: str) -> str | None:
         """Deterministic answer for "??i t??ng mi?n, gi?m h?c ph? l? ai/l? g?"."""
         if not query or not context_text:
@@ -973,7 +1410,7 @@ Hãy trả lời CHỈ bằng đúng 1 từ: "TRUE" hoặc "FALSE"."""
         q_fold = self._fold_for_match(query)
         is_fee_query = (
             ('hoc phi' in q_fold or 'le phi' in q_fold)
-            and any(k in q_fold for k in ['ky 1', 'ky i', '2025 2026', 'thu le phi', 'thu hoc phi'])
+            and any(k in q_fold for k in ['ky 1', 'ky i', 'ky 2', 'ky ii', '2025 2026', 'thu le phi', 'thu hoc phi'])
         )
         if not is_fee_query:
             return None
@@ -988,7 +1425,7 @@ Hãy trả lời CHỈ bằng đúng 1 từ: "TRUE" hoặc "FALSE"."""
         target_years = target_years[:2] if len(target_years) >= 2 else []
 
         normalized_ctx = self._normalize_text(context_text)
-        header_matches = list(re.finditer(r'\[(.*?)\]', normalized_ctx, flags=re.S))
+        header_matches = list(re.finditer(r'(?m)^\[(.*?)\]\s*$', normalized_ctx))
 
         selected_header = ''
         selected_index = -1
@@ -1011,7 +1448,13 @@ Hãy trả lời CHỈ bằng đúng 1 từ: "TRUE" hoặc "FALSE"."""
 
         if selected_index >= 0:
             start = header_matches[selected_index].end()
-            end = header_matches[selected_index + 1].start() if selected_index + 1 < len(header_matches) else len(normalized_ctx)
+            selected_header_fold = self._fold_for_match(selected_header)
+            end = len(normalized_ctx)
+            for next_idx in range(selected_index + 1, len(header_matches)):
+                next_header = self._normalize_text(header_matches[next_idx].group(1))
+                if self._fold_for_match(next_header) != selected_header_fold:
+                    end = header_matches[next_idx].start()
+                    break
             working_ctx = normalized_ctx[start:end]
         else:
             working_ctx = normalized_ctx
@@ -1087,6 +1530,26 @@ Hãy trả lời CHỈ bằng đúng 1 từ: "TRUE" hoặc "FALSE"."""
                         tuition_vals = candidate
                         break
 
+        tuition_amounts_found: List[str] = []
+        tuition_block_match = re.search(
+            r'\b1\s*khoan thu hoc phi\b[:\s]*(.*?)(?:\b2\s*thoi gian thu\b|\b3\s*dia diem\b|\Z)',
+            compact_fold,
+            flags=re.IGNORECASE | re.S,
+        )
+        if tuition_block_match:
+            amount_tokens = [
+                _format_fold_amount(token)
+                for token in re.findall(r'\d[\d ]{3,}', tuition_block_match.group(1))
+            ]
+            for token in amount_tokens:
+                if _looks_like_money(token) and token not in tuition_amounts_found:
+                    tuition_amounts_found.append(token)
+
+        if not tuition_vals and tuition_amounts_found:
+            ordered = tuition_amounts_found[:]
+            if len(ordered) >= 4:
+                tuition_vals = tuple(ordered[:4])
+
         fee_rows: List[Tuple[str, str]] = []
         for m in re.finditer(r'\|\s*\d+\s*\|\s*([^|]+?)\s*\|\s*([0-9][0-9\.,]*\s*[d\u0111]?)\s*\|', working_ctx, flags=re.IGNORECASE):
             item = re.sub(r'\s+', ' ', m.group(1)).strip(' .;-')
@@ -1100,6 +1563,27 @@ Hãy trả lời CHỈ bằng đúng 1 từ: "TRUE" hoặc "FALSE"."""
             m_item = re.search(r'tien dien[^0-9]{0,80}([0-9][0-9\.,]*)\s*d?', compact_fold)
             if m_item:
                 fee_rows.append(('Ti\u1ec1n \u0111i\u1ec7n \u0110HN\u0110, ti\u1ec1n n\u01b0\u1edbc u\u1ed1ng (c\u1ea3 n\u0103m)', f"{m_item.group(1)}\u0111"))
+
+        if not fee_rows:
+            for raw_line in working_ctx.splitlines():
+                raw_line = self._normalize_text(raw_line).strip()
+                if not raw_line:
+                    continue
+                if len(raw_line) > 160:
+                    continue
+                raw_fold = self._fold_for_match(raw_line)
+                if not raw_fold.startswith('le phi'):
+                    continue
+                amounts = [_normalize_amount_token(x) for x in re.findall(r'[0-9][0-9\.,]*', raw_line)]
+                amounts = [x for x in amounts if _looks_like_money(x)]
+                if not amounts:
+                    continue
+                item = re.sub(r'\s+', ' ', re.sub(r'[0-9][0-9\.,]*\s*[d\u0111]?', '', raw_line, count=1)).strip(' :-;,.')
+                if not item:
+                    item = 'Lệ phí'
+                amount = amounts[0] + '\u0111'
+                if all(item.lower() != existed[0].lower() for existed in fee_rows):
+                    fee_rows.append((item, amount))
 
         total_fee = ''
         m_total_fold = re.search(r'tong cong\s*([0-9 ]{3,})\s*d', compact_fold)
@@ -1118,10 +1602,17 @@ Hãy trả lời CHỈ bằng đúng 1 từ: "TRUE" hoặc "FALSE"."""
                     total_fee = nums[-1] + '\u0111'
                     break
 
+        normalized_working = self._normalize_text(working_ctx)
         m_time = re.search(
-            r'tu ngay\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})\s*den(?:\s*het)?\s*ngay\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})',
-            compact_fold,
+            r'từ ngày\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})\s*đến(?:\s*hết)?\s*ngày\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})',
+            normalized_working,
+            flags=re.IGNORECASE,
         )
+        if not m_time:
+            m_time = re.search(
+                r'tu ngay\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})\s*den(?:\s*het)?\s*ngay\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})',
+                compact_fold,
+            )
         time_range = f"{m_time.group(1)} - {m_time.group(2)}" if m_time else ''
 
         pay_methods = []
@@ -1137,7 +1628,7 @@ Hãy trả lời CHỈ bằng đúng 1 từ: "TRUE" hoặc "FALSE"."""
         if m_url:
             portal = m_url.group(0).rstrip('.),;')
 
-        if not tuition_vals and not fee_rows:
+        if not tuition_vals and not fee_rows and not total_fee and not time_range and not pay_methods:
             return None
 
         lines = [f'**{title}**', '']
@@ -1152,9 +1643,20 @@ Hãy trả lời CHỈ bằng đúng 1 từ: "TRUE" hoặc "FALSE"."""
 
         if tuition_vals:
             lines.append('**M\u1ee9c h\u1ecdc ph\u00ed (\u0111\u1ed3ng/t\u00edn ch\u1ec9):**')
-            lines.append(f'- Kh\u00f3a 11: **{tuition_vals[0]}**')
-            lines.append(f'- Kh\u00f3a 12: **{tuition_vals[1]}**')
-            lines.append(f'- Kh\u00f3a 13: **{tuition_vals[2]}**')
+            if len(tuition_vals) >= 4:
+                lines.append(f'- Kh\u00f3a 11: **{tuition_vals[0]}**')
+                lines.append(f'- Kh\u00f3a 13: **{tuition_vals[1]}**')
+                lines.append(f'- Kh\u00f3a 14: **{tuition_vals[2]}**')
+                lines.append(f'- Kh\u00f3a 12: **{tuition_vals[3]}**')
+            elif len(tuition_vals) >= 3:
+                lines.append(f'- Kh\u00f3a 11: **{tuition_vals[0]}**')
+                lines.append(f'- Kh\u00f3a 12: **{tuition_vals[1]}**')
+                lines.append(f'- Kh\u00f3a 13: **{tuition_vals[2]}**')
+            else:
+                lines.append(f'- Các mức thể hiện trong tài liệu: **{", ".join(tuition_vals)}**')
+            if tuition_amounts_found and len(tuition_amounts_found) > 4:
+                extra_rates = ', '.join(tuition_amounts_found[4:])
+                lines.append(f'- Mức khác thể hiện trong tài liệu: **{extra_rates}**')
             lines.append('')
 
         if fee_rows:
@@ -1173,6 +1675,338 @@ Hãy trả lời CHỈ bằng đúng 1 từ: "TRUE" hoặc "FALSE"."""
             lines.append('**Ph\u01b0\u01a1ng th\u1ee9c n\u1ed9p:**')
             for method in pay_methods[:3]:
                 lines.append(f'- {method}')
+
+        return '\n'.join(lines).strip()
+
+
+    def _build_fee_notice_answer_v2(self, query: str, context_text: str) -> str | None:
+        """Safer deterministic parser for noisy OCR fee notices."""
+        if not query or not context_text:
+            return None
+
+        q_fold = self._fold_for_match(query)
+        is_fee_query = (
+            ('hoc phi' in q_fold or 'le phi' in q_fold)
+            and any(token in q_fold for token in ['ky 1', 'ky i', 'ky 2', 'ky ii', '2025 2026', 'thu le phi', 'thu hoc phi'])
+        )
+        if not is_fee_query:
+            return None
+
+        target_semester = ''
+        if re.search(r'\bky\s*(1|i)\b', q_fold):
+            target_semester = 'i'
+        elif re.search(r'\bky\s*(2|ii)\b', q_fold):
+            target_semester = 'ii'
+
+        target_years = re.findall(r'20\d{2}', q_fold)
+        target_years = target_years[:2] if len(target_years) >= 2 else []
+
+        raw_ctx = unicodedata.normalize("NFC", context_text)
+        raw_lines = [line.strip() for line in raw_ctx.splitlines()]
+        header_lines = [line for line in raw_lines if re.fullmatch(r'\[.*\]', line)]
+        selected_header = header_lines[0][1:-1].strip() if header_lines else ''
+        working_lines = [
+            line for line in raw_lines
+            if line and line != '---' and not re.fullmatch(r'\[.*\]', line)
+        ]
+        working_ctx = '\n'.join(working_lines).strip()
+        if not working_ctx:
+            return None
+
+        compact_fold = self._fold_for_match(working_ctx)
+        header_fold = self._fold_for_match(selected_header)
+        combined_fold = f"{header_fold} {compact_fold}".strip()
+
+        if target_semester == 'i':
+            has_semester = any(marker in combined_fold for marker in ['ky i', 'ky 1'])
+        elif target_semester == 'ii':
+            has_semester = any(marker in combined_fold for marker in ['ky ii', 'ky 2'])
+        else:
+            has_semester = any(marker in combined_fold for marker in ['thu hoc phi ky', 'le phi hoc ky', 'hoc phi ky', 'thu le phi ky'])
+        if not has_semester:
+            return None
+        if target_years and not all(year in combined_fold for year in target_years):
+            return None
+
+        title = 'THÔNG BÁO về việc thu học phí, lệ phí'
+        so = ''
+        ngay = ''
+        if selected_header:
+            for part in selected_header.split('|'):
+                part_norm = self._normalize_text(part).strip()
+                if ':' not in part_norm:
+                    continue
+                value = part_norm.split(':', 1)[1].strip()
+                part_fold = self._fold_for_match(part_norm)
+                if part_fold.startswith('van ban') and value:
+                    title = value
+                elif part_fold.startswith('so') and value:
+                    so = value
+                elif part_fold.startswith('ngay') and value:
+                    ngay = value
+
+        if title == 'THÔNG BÁO về việc thu học phí, lệ phí':
+            for idx, line in enumerate(working_lines):
+                if self._fold_for_match(line) == 'thong bao':
+                    next_line = working_lines[idx + 1] if idx + 1 < len(working_lines) else ''
+                    if next_line:
+                        title = f"THÔNG BÁO {next_line}"
+                    break
+
+        def _normalize_amount_token(token: str) -> str:
+            return re.sub(r'[^0-9\.,]', '', token or '').strip('.,')
+
+        def _looks_like_money(token: str) -> bool:
+            return bool(re.fullmatch(r'\d{1,3}(?:[\.,]\d{3})+', token or ''))
+
+        def _format_fold_amount(token: str) -> str:
+            digits = re.sub(r'[^0-9]', '', token or '')
+            if len(digits) < 4:
+                return digits
+            groups = []
+            while digits:
+                groups.append(digits[-3:])
+                digits = digits[:-3]
+            return '.'.join(reversed(groups))
+
+        def _extract_money_tokens(text: str, dedupe: bool = True) -> List[str]:
+            values: List[str] = []
+            for raw_token in re.findall(r'\d{1,3}(?:[\.,]\d{3})+', text or ''):
+                normalized = _normalize_amount_token(raw_token)
+                if not _looks_like_money(normalized):
+                    continue
+                if dedupe and normalized in values:
+                    continue
+                if normalized:
+                    values.append(normalized)
+            return values
+
+        tuition_block = ''
+        tuition_match = re.search(
+            r'(?is)1\.\s*khoản thu học phí\s*:?(.*?)(?:\n\s*2\.\s*thời gian thu|\Z)',
+            working_ctx,
+        )
+        if tuition_match:
+            tuition_block = tuition_match.group(1).strip()
+        tuition_block_fold = self._fold_for_match(tuition_block)
+        tuition_lines = [
+            self._normalize_text(line).strip()
+            for line in tuition_block.splitlines()
+            if self._normalize_text(line).strip()
+        ]
+        tuition_amounts_found = _extract_money_tokens(tuition_block, dedupe=False)
+
+        khoa_columns: List[str] = []
+        for raw_line in tuition_lines:
+            for match in re.findall(r'Khóa\s*\d+', raw_line, flags=re.IGNORECASE):
+                normalized_col = re.sub(r'\s+', ' ', self._normalize_text(match)).strip()
+                if normalized_col and normalized_col not in khoa_columns:
+                    khoa_columns.append(normalized_col)
+
+        def _smooth_majority_tail(values: List[str]) -> List[str]:
+            if len(values) < 4:
+                return values
+            tail = values[1:]
+            counts: Dict[str, int] = {}
+            for token in tail:
+                counts[token] = counts.get(token, 0) + 1
+            majority_value = ''
+            majority_count = 0
+            for token, count in counts.items():
+                if count > majority_count:
+                    majority_value = token
+                    majority_count = count
+            if majority_count < 2:
+                return values
+            outliers = [token for token in tail if token != majority_value]
+            if len(outliers) != 1:
+                return values
+            majority_digits = int(re.sub(r'[^0-9]', '', majority_value) or '0')
+            outlier_digits = int(re.sub(r'[^0-9]', '', outliers[0]) or '0')
+            if majority_digits and abs(majority_digits - outlier_digits) <= 100000:
+                return [values[0]] + [majority_value if token != majority_value else token for token in tail]
+            return values
+
+        def _find_rates_near_label(label_token: str, expected_count: int = 0) -> List[str]:
+            best: List[str] = []
+            for idx, raw_line in enumerate(tuition_lines):
+                if label_token not in self._fold_for_match(raw_line):
+                    continue
+                for offset in [0, -1, 1, -2, 2]:
+                    pos = idx + offset
+                    if pos < 0 or pos >= len(tuition_lines):
+                        continue
+                    tokens = _extract_money_tokens(tuition_lines[pos], dedupe=False)
+                    if expected_count and len(tokens) >= expected_count:
+                        return tokens[:expected_count]
+                    if len(tokens) > len(best):
+                        best = tokens
+                window_start = max(0, idx - 2)
+                window_end = min(len(tuition_lines), idx + 3)
+                window_tokens = _extract_money_tokens(' '.join(tuition_lines[window_start:window_end]), dedupe=False)
+                if expected_count and len(window_tokens) >= expected_count:
+                    return window_tokens[:expected_count]
+                if len(window_tokens) > len(best):
+                    best = window_tokens
+            return best[:expected_count] if expected_count and len(best) >= expected_count else best
+
+        tuition_vi_rates: List[str] = []
+        english_rates: List[str] = []
+        if khoa_columns:
+            tuition_vi_rates = _find_rates_near_label('tieng viet', len(khoa_columns))
+            if not tuition_vi_rates and len(tuition_amounts_found) >= len(khoa_columns):
+                tuition_vi_rates = tuition_amounts_found[:len(khoa_columns)]
+            tuition_vi_rates = _smooth_majority_tail(tuition_vi_rates)
+
+            english_rates = _find_rates_near_label('tieng anh', 0)
+            if len(english_rates) > len(khoa_columns):
+                english_rates = english_rates[:len(khoa_columns)]
+            if len(english_rates) == len(khoa_columns):
+                english_rates = _smooth_majority_tail(english_rates)
+        else:
+            has_khoa_columns = all(marker in tuition_block_fold for marker in ['khoa 11', 'khoa 13', 'khoa 14', 'khoa 12'])
+            if has_khoa_columns and len(tuition_amounts_found) >= 4:
+                khoa_columns = ['Khóa 11', 'Khóa 13', 'Khóa 14', 'Khóa 12']
+                tuition_vi_rates = _smooth_majority_tail(tuition_amounts_found[:4])
+                if len(tuition_amounts_found) >= 5:
+                    english_rates = [tuition_amounts_found[4]]
+
+        fee_rows: List[Tuple[str, str]] = []
+        seen_fee_items = set()
+        for raw_line in working_lines:
+            raw_fold = self._fold_for_match(raw_line)
+            if not raw_fold.startswith('le phi'):
+                continue
+            amounts = _extract_money_tokens(raw_line)
+            if not amounts:
+                continue
+            item = re.sub(
+                r'\d{1,3}(?:[\.,]\d{3})+\s*[dđ]?',
+                '',
+                raw_line,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            item = re.sub(r'\s+', ' ', item).strip(' :-;,.')
+            if not item:
+                item = 'Lệ phí'
+            item_key = self._fold_for_match(item)
+            if item_key in seen_fee_items:
+                continue
+            seen_fee_items.add(item_key)
+            fee_rows.append((item, amounts[0] + 'đ'))
+
+        total_fee = ''
+        for raw_line in working_lines:
+            if 'tong cong' not in self._fold_for_match(raw_line):
+                continue
+            amounts = _extract_money_tokens(raw_line)
+            if amounts:
+                total_fee = amounts[-1] + 'đ'
+                break
+        if not total_fee:
+            total_match = re.search(r'tong cong\s*([0-9 ]{3,})\s*d', compact_fold)
+            if total_match:
+                formatted = _format_fold_amount(total_match.group(1))
+                if _looks_like_money(formatted):
+                    total_fee = formatted + 'đ'
+
+        normalized_working = unicodedata.normalize("NFC", working_ctx)
+        time_match = re.search(
+            r'từ ngày\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})\s*đến(?:\s*hết)?\s*ngày\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})',
+            normalized_working,
+            flags=re.IGNORECASE,
+        )
+        if not time_match:
+            time_match = re.search(
+                r'tu ngay\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})\s*den(?:\s*het)?\s*ngay\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})',
+                compact_fold,
+            )
+        time_range = f"{time_match.group(1)} - {time_match.group(2)}" if time_match else ''
+
+        pay_methods = []
+        if 'nop tien mat' in compact_fold:
+            pay_methods.append('Nộp tiền mặt tại Phòng Kế hoạch - Tài chính (Tầng 1, tòa nhà 31 Dịch Vọng Hậu).')
+        if 'qr code' in compact_fold:
+            pay_methods.append('Nộp qua QR-Code động trên cổng sinh viên.')
+        if 'the atm noi dia' in compact_fold or 'may pos' in compact_fold:
+            pay_methods.append('Nộp qua thẻ ATM nội địa tại Phòng Kế hoạch - Tài chính (máy POS).')
+
+        portal = ''
+        squashed_ctx = re.sub(r'\s+', '', working_ctx)
+        url_match = re.search(
+            r'https?://sinhvien\.?fbu\.?edu\.?vn/sinh-vien-dang-nhap\.html',
+            squashed_ctx,
+            flags=re.IGNORECASE,
+        )
+        if url_match:
+            portal = url_match.group(0)
+        else:
+            url_match = re.search(r'https?://\S+', working_ctx)
+            if url_match:
+                portal = url_match.group(0).rstrip('.),;')
+
+        if not tuition_vi_rates and not english_rates and not fee_rows and not total_fee and not time_range and not pay_methods:
+            return None
+
+        lines = [f'**{title}**', '']
+        meta = []
+        if so:
+            meta.append(f'**Số:** {so}')
+        if ngay:
+            meta.append(f'**Ngày:** {ngay}')
+        if meta:
+            lines.append(' | '.join(meta))
+            lines.append('')
+
+        if tuition_vi_rates or english_rates or tuition_amounts_found:
+            lines.append('**Khoản thu học phí:**')
+            lines.append('- Đơn vị tính: đồng/tín chỉ')
+            if tuition_vi_rates:
+                if khoa_columns and len(khoa_columns) == len(tuition_vi_rates):
+                    joined_rates = '; '.join(
+                        f'{column}: **{amount}**' for column, amount in zip(khoa_columns, tuition_vi_rates)
+                    )
+                    lines.append(f'- Các ngành đào tạo bằng tiếng Việt: {joined_rates}.')
+                else:
+                    lines.append(f'- Các ngành đào tạo bằng tiếng Việt: **{" / ".join(tuition_vi_rates)}**.')
+            if english_rates:
+                if len(english_rates) == 1:
+                    lines.append(f'- Các ngành đào tạo bằng tiếng Anh: **{english_rates[0]}**.')
+                elif khoa_columns and len(khoa_columns) == len(english_rates):
+                    joined_rates = '; '.join(
+                        f'{column}: **{amount}**' for column, amount in zip(khoa_columns, english_rates)
+                    )
+                    lines.append(f'- Các ngành đào tạo bằng tiếng Anh: {joined_rates}.')
+                else:
+                    lines.append(f'- Các ngành đào tạo bằng tiếng Anh: **{" / ".join(english_rates)}**.')
+            if not tuition_vi_rates and tuition_amounts_found:
+                lines.append(f'- Các mức thể hiện trong tài liệu: **{", ".join(tuition_amounts_found[:5])}**.')
+            lines.append('')
+
+        if fee_rows:
+            lines.append('**Các khoản lệ phí:**')
+            for item, amount in fee_rows[:5]:
+                lines.append(f'- {item}: **{amount}**')
+            if total_fee:
+                lines.append(f'- Tổng cộng: **{total_fee}**')
+            lines.append('')
+        elif total_fee:
+            lines.append('**Lệ phí:**')
+            lines.append(f'- Tổng cộng: **{total_fee}**')
+            lines.append('')
+
+        if time_range:
+            lines.append(f'**Thời gian thu:** {time_range}')
+        if portal:
+            lines.append(f'**Cổng thanh toán:** {portal}')
+        if pay_methods:
+            lines.append('**Phương thức nộp:**')
+            for method in pay_methods[:3]:
+                lines.append(f'- {method}')
+        if 'khong du dieu kien hoc tap' in compact_fold:
+            lines.append('')
+            lines.append('**Lưu ý:** Sau hạn thu, sinh viên chưa nộp học phí sẽ không đủ điều kiện học tập và dự thi theo quy định của trường.')
 
         return '\n'.join(lines).strip()
 
@@ -1328,6 +2162,16 @@ Hãy trả lời CHỈ bằng đúng 1 từ: "TRUE" hoặc "FALSE"."""
         cleaned = '\n'.join(output)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
         return cleaned
+
+    def _has_markdown_table(self, text: str) -> bool:
+        if not text or '|' not in text:
+            return False
+
+        lines = text.split('\n')
+        for idx in range(len(lines) - 1):
+            if '|' in lines[idx] and self._is_markdown_table_separator(lines[idx + 1]):
+                return True
+        return False
 
     def _clean_context_line(self, line: str) -> str:
         if not line:
@@ -1663,6 +2507,10 @@ Hãy trả lời CHỈ bằng đúng 1 từ: "TRUE" hoặc "FALSE"."""
         if any(err in folded_response for err in ['xin loi', 'su co ket noi', 'khong tim thay thong tin']) and len(folded_response) < 240:
             return generic
 
+        context_has_grounded_table = self._has_markdown_table(context_text) or '<table>' in context_text.lower()
+        if self._has_markdown_table(response) and not context_has_grounded_table:
+            return generic
+
         generic_titles = []
         for line in generic.split('\n'):
             m = re.match(r'^\*\*(.+?):\*\*$', line.strip())
@@ -1963,21 +2811,33 @@ Trả lời:"""
         
         # Thu thập doc_ids và đếm hits per doc
         seen_ids = set()
-        doc_hit_count = {}  # doc_id → count of hits
+        doc_hit_stats = {}  # doc_id → stats from original retrieval hits
         for hit in hits:
+            setattr(hit, '_seed_hit', True)
             seen_ids.add(str(hit.id))
             doc_id = hit.payload.get('doc_id')
             if doc_id:
-                doc_hit_count[doc_id] = doc_hit_count.get(doc_id, 0) + 1
+                stats = doc_hit_stats.setdefault(doc_id, {'count': 0, 'best_score': 0.0})
+                stats['count'] += 1
+                score = float(getattr(hit, 'score', 0) or 0)
+                if score > stats['best_score']:
+                    stats['best_score'] = score
         
-        if not doc_hit_count:
+        if not doc_hit_stats:
             return hits
         
         # Chỉ expand TOP 2 documents có nhiều hits nhất
-        sorted_docs = sorted(doc_hit_count.items(), key=lambda x: x[1], reverse=True)
+        sorted_docs = sorted(
+            doc_hit_stats.items(),
+            key=lambda item: (item[1]['count'], item[1]['best_score']),
+            reverse=True,
+        )
         top_doc_ids = [doc_id for doc_id, _ in sorted_docs[:2]]
         
-        print(f"📄 [Expansion] Top docs: {[(d, doc_hit_count[d]) for d in top_doc_ids]}")
+        print(
+            "📄 [Expansion] Top docs:",
+            [(doc_id, doc_hit_stats[doc_id]['count']) for doc_id in top_doc_ids]
+        )
         
         expanded = list(hits)  # Giữ nguyên hits gốc
         MAX_EXPANSION_PER_DOC = 10  # Giới hạn chunks thêm per doc
@@ -2005,6 +2865,7 @@ Trả lời:"""
                     continue
                 
                 seen_ids.add(chunk_id)
+                setattr(chunk, '_seed_hit', False)
                 expanded.append(chunk)
                 added += 1
             
@@ -2039,11 +2900,12 @@ Trả lời:"""
         return years, ranges
 
     def _extract_query_topic_terms(self, query: str) -> List[str]:
-        q = self._normalize_text(query).lower()
+        q = self._fold_for_match(query)
         candidate_terms = [
-            'miễn giảm học phí', 'miễn, giảm học phí', 'miễn giảm', 'học phí', 'hồ sơ',
-            'học bổng', 'điểm rèn luyện', 'lịch thi', 'đổi lịch thi', 'tết', 'nguyên đán',
-            'thu học phí', 'lệ phí', 'tốt nghiệp', 'học kỳ'
+            'mien giam hoc phi', 'mien giam', 'hoc phi', 'ho so',
+            'hoc bong', 'diem ren luyen', 'lich thi', 'doi lich thi', 'tet', 'nguyen dan',
+            'binh ngo', 'thu hoc phi', 'le phi', 'tot nghiep', 'hoc ky',
+            'thi chuan dau ra ngoai ngu', 'chuan dau ra ngoai ngu', 'ngoai ngu'
         ]
         terms = []
         for t in candidate_terms:
@@ -2083,7 +2945,7 @@ Trả lời:"""
         if not hits:
             return hits
 
-        q = self._normalize_text(query).lower()
+        q = self._fold_for_match(query)
         topic_terms = self._extract_query_topic_terms(query)
         if not topic_terms:
             return hits
@@ -2095,6 +2957,9 @@ Trả lời:"""
                 str(payload.get('title', '')),
                 str(payload.get('source', '')),
                 str(payload.get('content', '')),
+                str(payload.get('section', '')),
+                str(payload.get('topic', '')),
+                str(payload.get('doc_type', '')),
             ])
             if self._topic_matches(haystack, topic_terms):
                 matched.append(hit)
@@ -2102,10 +2967,53 @@ Trả lời:"""
         if matched:
             return matched
 
-        strict_topics = ['tết', 'nguyên đán']
+        strict_topics = ['tet', 'nguyen dan', 'binh ngo']
         if any(term in q for term in strict_topics):
             print("[Topic Guard] Strict topic requested but no topic-matched hit found.")
             return []
+
+        return hits
+
+    def _extract_query_phrase_anchors(self, query: str) -> List[List[str]]:
+        q = self._fold_for_match(query)
+        anchors: List[List[str]] = []
+
+        if 'thu hoc phi' in q and 'le phi' in q:
+            anchors.append(['thu hoc phi', 'le phi'])
+        if 'mien giam hoc phi' in q:
+            anchors.append(['mien giam hoc phi'])
+        if 'chuan dau ra ngoai ngu' in q:
+            anchors.append(['chuan dau ra ngoai ngu'])
+
+        return anchors
+
+    def _apply_phrase_anchor_guard(self, hits: List, query: str) -> List:
+        if not hits:
+            return hits
+
+        anchors = self._extract_query_phrase_anchors(query)
+        if not anchors:
+            return hits
+
+        matched = []
+        for hit in hits:
+            payload = getattr(hit, 'payload', {}) or {}
+            haystack = ' '.join([
+                str(payload.get('title', '')),
+                str(payload.get('source', '')),
+                str(payload.get('doc_type', '')),
+                str(payload.get('section', '')),
+                str(payload.get('topic', '')),
+                str(payload.get('content_folded', '')),
+                str(payload.get('content', '')),
+            ])
+            folded_haystack = self._fold_for_match(haystack)
+            if any(all(term in folded_haystack for term in group) for group in anchors):
+                matched.append(hit)
+
+        if matched:
+            print(f"🎯 [Phrase Guard] keep {len(matched)}/{len(hits)} hits by phrase anchors")
+            return matched
 
         return hits
 
@@ -2130,6 +3038,9 @@ Trả lời:"""
                     str(hit_payload.get('title', '')),
                     str(hit_payload.get('source', '')),
                     str(hit_payload.get('content', '')),
+                    str(hit_payload.get('section', '')),
+                    str(hit_payload.get('topic', '')),
+                    str(hit_payload.get('doc_type', '')),
                 ])
                 if require_topic and topic_terms and not self._topic_matches(hit_text, topic_terms):
                     continue
@@ -2196,24 +3107,52 @@ Trả lời:"""
         if not hits:
             return hits
 
-        doc_stats = defaultdict(lambda: {'count': 0, 'best_score': 0.0})
+        doc_stats = defaultdict(lambda: {'count': 0, 'seed_count': 0, 'best_score': 0.0, 'score_sum': 0.0})
         for hit in hits:
             doc_id = hit.payload.get('doc_id')
             if doc_id is None:
                 continue
             doc_stats[doc_id]['count'] += 1
             score = float(getattr(hit, 'score', 0) or 0)
+            doc_stats[doc_id]['score_sum'] += score
+            if getattr(hit, '_seed_hit', False):
+                doc_stats[doc_id]['seed_count'] += 1
             if score > doc_stats[doc_id]['best_score']:
                 doc_stats[doc_id]['best_score'] = score
 
         if not doc_stats:
             return hits
 
-        primary_doc = max(doc_stats.items(), key=lambda item: (item[1]['count'], item[1]['best_score']))[0]
+        primary_doc = max(
+            doc_stats.items(),
+            key=lambda item: (
+                item[1]['seed_count'],
+                item[1]['best_score'],
+                item[1]['score_sum'],
+                item[1]['count'],
+            ),
+        )[0]
         focused = [h for h in hits if h.payload.get('doc_id') == primary_doc]
         focused = sorted(focused, key=self._chunk_order_key)
         print(f"🎯 [Doc Focus] Keep doc_id={primary_doc}: {len(focused)}/{len(hits)} chunks")
         return focused if focused else hits
+
+    def _hit_matches_explicit_doc_number(self, hit, doc_number: str) -> bool:
+        if not doc_number:
+            return True
+
+        folded_number = fold_text_for_search(str(doc_number))
+        if not folded_number:
+            return True
+
+        payload = getattr(hit, 'payload', {}) or {}
+        haystacks = [
+            str(payload.get('doc_number', '')),
+            str(payload.get('title', '')),
+            str(payload.get('source', '')),
+        ]
+        pattern = rf'(?<!\d){re.escape(folded_number)}(?!\d)'
+        return any(re.search(pattern, fold_text_for_search(text)) for text in haystacks if text)
 
     def _rerank_by_query_type(self, results: List, analysis: Dict) -> List:
         """Re-rank results dựa trên query type để ưu tiên chunks phù hợp và DỮ LIỆU MỚI"""
@@ -2259,6 +3198,7 @@ Trả lời:"""
                     'hoc_bong': ['học bổng', 'cấp học bổng'],
                     'diem_ren_luyen': ['điểm rèn luyện', 'rèn luyện'],
                     'lich_thi': ['lịch thi', 'đổi lịch'],
+                    'ngoai_ngu': ['chuẩn đầu ra ngoại ngữ', 'ngoại ngữ', 'toeic', 'c1'],
                     'tet': ['tết', 'nguyên đán'],
                     'tot_nghiep': ['tốt nghiệp']
                 }
@@ -2275,6 +3215,8 @@ Trả lời:"""
                     query_group = 'diem_ren_luyen'
                 elif any(m in original_query_lower for m in ['lịch thi', 'ngày thi']):
                     query_group = 'lich_thi'
+                elif any(m in original_query_lower for m in ['chuẩn đầu ra ngoại ngữ', 'ngoại ngữ', 'toeic', 'c1']):
+                    query_group = 'ngoai_ngu'
                 elif any(m in original_query_lower for m in ['tết', 'nguyên đán', 'bính ngọ']):
                     query_group = 'tet'
                 elif any(m in original_query_lower for m in ['tốt nghiệp']):
@@ -2516,6 +3458,7 @@ Tóm tắt:"""
             
         print(f"🔍 [Pre-Lookup] Tự động tra cứu MSV cho tên: '{name}'")
         name_words = name.split()
+        folded_name_words = [fold_text_for_search(word) for word in name_words if word]
         
         # Chỉ tập trung vào file chứa danh sách sinh viên
         filter_dict = {
@@ -2543,8 +3486,9 @@ Tóm tắt:"""
             for msv, full_name in rows:
                 msv = msv.strip()
                 full_name = full_name.strip()
+                full_name_folded = fold_text_for_search(full_name)
                 # Kiểm tra tất cả cụm từ của tên có xuất hiện trong full_name không
-                if all(w.lower() in full_name.lower() for w in name_words):
+                if all(w and w in full_name_folded for w in folded_name_words):
                     entry = (msv, full_name)
                     if entry not in matched_students:
                         matched_students.append(entry)
@@ -2565,14 +3509,18 @@ Tóm tắt:"""
             return False
 
         tokens = [t for t in cleaned.split() if t]
-        if len(tokens) < 2 or len(tokens) > 5:
+        if len(tokens) < 1 or len(tokens) > 5:
+            return False
+        if cleaned.isupper() and len(cleaned) <= 6:
             return False
 
         forbidden = {
             'thông', 'báo', 'quyết', 'định', 'công', 'văn', 'nội', 'dung',
             'điểm', 'rèn', 'luyện', 'học', 'phí', 'học', 'bổng', 'miễn',
             'giảm', 'hồ', 'sơ', 'quy', 'trình', 'thủ', 'tục', 'nghỉ',
-            'tết', 'nguyên', 'đán', 'năm', 'học', 'kỳ', 'thời', 'gian'
+            'tết', 'nguyên', 'đán', 'năm', 'học', 'kỳ', 'thời', 'gian',
+            'không', 'khong', 'ko', 'ạ', 'à', 'vậy', 'thế', 'nhé', 'nhe', 'nhỉ', 'nhi',
+            'msv', 'sv', 'hk1', 'hk2', 'hk3'
         }
 
         hit_forbidden = sum(1 for t in tokens if t.lower() in forbidden)
@@ -2585,18 +3533,19 @@ Tóm tắt:"""
         """Trích xuất tên người trong ngữ cảnh tra cứu sinh viên, tránh bắt nhầm chủ đề văn bản."""
         query = self._normalize_text(query)
         q = query.lower()
+        q_fold = fold_text_for_search(query)
 
         person_hints = [
-            'msv', 'mã sinh viên', 'sinh viên', 'điểm của',
-            'điểm rèn luyện', 'điểm thi', 'điểm rèn luyện của',
-            'xếp loại của', 'kết quả học tập của', 'của'
+            'msv', 'ma sinh vien', 'sinh vien', 'diem cua',
+            'diem ren luyen', 'diem thi', 'diem ren luyen cua',
+            'xep loai cua', 'ket qua hoc tap cua', 'cua'
         ]
-        if not any(h in q for h in person_hints):
+        if not any(h in q_fold for h in person_hints):
             return None
 
         # [NEW] Ưu tiên tìm các cụm từ viết hoa rõ ràng (đúng chuẩn tên riêng) vì refined_query thường viết hoa đúng chuẩn
         spans = re.findall(
-            r'\b[A-ZÀ-Ỹ][\wÀ-ỹ]{1,6}(?:\s+[A-ZÀ-Ỹ][\wÀ-ỹ]{1,6}){1,4}\b',
+            r'\b[A-ZÀ-Ỹ][\wÀ-ỹ]{1,6}(?:\s+[A-ZÀ-Ỹ][\wÀ-ỹ]{1,6}){0,4}\b',
             query
         )
         for span in reversed(spans):
@@ -2607,14 +3556,19 @@ Tóm tắt:"""
 
         # Fallback: Ưu tiên cụm ngay sau "của"/"về" (cho trường hợp user query không viết hoa)
         match = re.search(
-            r'(?:của|hỏi về|về)\s+(?:sinh viên|bạn|bạn tên|người tên)?\s*([\wÀ-ỹ]+(?:\s+[\wÀ-ỹ]+){1,4})',
+            r'(?:của|cua|hỏi về|hoi ve|về|ve)\s+(?:sinh viên|sinh vien|bạn|ban|bạn tên|ban ten|người tên|nguoi ten)?\s*([\wÀ-ỹ]+(?:\s+[\wÀ-ỹ]+){0,4})',
             query,
             re.IGNORECASE
         )
         if match:
             candidate = match.group(1).strip()
             # Cắt các hậu tố câu hỏi phổ biến (nếu có)
-            candidate = re.split(r'\b(là|bao nhiêu|như thế nào|ra sao|học|tại)\b', candidate, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+            candidate = re.split(
+                r'\b(là|bao nhiêu|như thế nào|ra sao|học|tại|không|khong|ko|ạ|à|vậy|thế|nhé|nhe|nhỉ|nhi)\b',
+                candidate,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0].strip(" ,.!?;:")
             if self._looks_like_person_name(candidate):
                 return " ".join(word.capitalize() for word in candidate.split())
 
@@ -2660,7 +3614,7 @@ Tóm tắt:"""
                 top_source = src
                 break
 
-        display_source = top_source or 'Tài liệu scan (OCR)'
+        display_source = top_source or 'Tài liệu liên quan'
         display_source = re.sub(r'^\d{14}_', '', display_source)
         display_source = re.sub(r'_(\d{4})\.pdf$', r'.pdf', display_source, flags=re.IGNORECASE)
 
@@ -2702,19 +3656,19 @@ Tóm tắt:"""
             if len(dates) >= 2:
                 break
         if dates:
-            facts.append(f"Mốc thời gian OCR đọc được: {', '.join(f'`{d}`' for d in dates)}.")
+            facts.append(f"Mốc thời gian thể hiện trong tài liệu: {', '.join(f'`{d}`' for d in dates)}.")
 
         if not facts:
-            facts.append("Bản OCR bị nhiễu mạnh, chưa đủ dữ liệu để trích xuất chính xác từng điều khoản.")
+            facts.append("Hiện chưa đủ dữ liệu rõ ràng để trích xuất chính xác từng điều khoản.")
 
         lines = [
             f"**Tài liệu liên quan:** {display_source}",
             "",
-            "Dữ liệu OCR khá nhiễu nên mình chỉ nêu các ý chắc chắn đọc được:",
+            "Mình chỉ nêu các ý có thể xác định chắc chắn từ tài liệu:",
         ]
         lines.extend([f"- {f}" for f in facts])
         lines.append("")
-        lines.append("Nếu bạn cần độ chính xác cao theo từng điều/mục, mình sẽ trích nguyên văn từng đoạn OCR để bạn đối chiếu trực tiếp.")
+        lines.append("Nếu bạn cần chi tiết theo từng điều/mục, mình sẽ trích nguyên văn từng đoạn trong tài liệu để bạn đối chiếu trực tiếp.")
 
         return '\n'.join(lines)
 
@@ -2792,9 +3746,9 @@ Tóm tắt:"""
         
         return None
 
-    def _build_clarification_response(self, name_keyword: str, hits: List) -> str:
-        """Tạo câu hỏi làm rõ với danh sách sinh viên tìm được."""
+    def _collect_student_matches_from_hits(self, name_keyword: str, hits: List) -> List[Tuple[str, str]]:
         matched = []
+        folded_keyword = fold_text_for_search(name_keyword)
         for hit in hits:
             content = hit.payload.get('content', '')
             rows = re.findall(
@@ -2802,10 +3756,33 @@ Tóm tắt:"""
                 content
             )
             for msv, full_name in rows:
-                if name_keyword.lower() in full_name.lower():
+                full_name_folded = fold_text_for_search(full_name)
+                if folded_keyword and folded_keyword in full_name_folded:
                     entry = (msv.strip(), full_name.strip())
                     if entry not in matched:
                         matched.append(entry)
+        return matched
+
+    def _collect_all_student_matches_from_hits(self, hits: List) -> List[Tuple[str, str]]:
+        matched = []
+        seen = set()
+        for hit in hits:
+            content = hit.payload.get('content', '')
+            rows = re.findall(
+                r'\|\s*\d+\s*\|\s*(\d{10})\s*\|\s*([^|]+?)\s*\|',
+                content
+            )
+            for msv, full_name in rows:
+                entry = (msv.strip(), full_name.strip())
+                if entry in seen:
+                    continue
+                seen.add(entry)
+                matched.append(entry)
+        return matched
+
+    def _build_clarification_response(self, name_keyword: str, hits: List) -> str:
+        """Tạo câu hỏi làm rõ với danh sách sinh viên tìm được."""
+        matched = self._collect_student_matches_from_hits(name_keyword, hits)
         
         if not matched:
             return f"Mình không tìm thấy sinh viên nào tên **{name_keyword}** trong dữ liệu."
@@ -2813,7 +3790,7 @@ Tóm tắt:"""
         lines = [f"Mình tìm thấy **{len(matched)} sinh viên** có tên chứa \"{name_keyword}\", bạn muốn hỏi về ai?\n"]
         for msv, name in matched:
             lines.append(f"- **{name}** — MSV: `{msv}`")
-        lines.append("\nBạn hãy nhập **mã sinh viên** để mình tìm chính xác nhé!")
+        lines.append("\nBạn hãy nhập **mã sinh viên** hoặc **tên đầy đủ** để mình tìm chính xác nhé!")
         
         return "\n".join(lines)
 

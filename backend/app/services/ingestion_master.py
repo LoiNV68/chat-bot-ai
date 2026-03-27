@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import tempfile
@@ -14,7 +14,7 @@ from app.services.pdf_processor import (
     extract_tables_from_scan,
     extract_tables_to_markdown,
     extract_text_pymupdf,
-    run_hybrid_ocr_wsl,
+    run_hybrid_ocr,
 )
 from app.services.text_normalization import (
     clean_ocr_text,
@@ -92,6 +92,17 @@ def _normalize_text_documents(text_docs: list[Document], table_pages: set[int]) 
     return normalized
 
 
+def _apply_global_metadata(text_docs: list[Document], global_metadata: dict) -> list[Document]:
+    merged_docs: list[Document] = []
+
+    for doc in text_docs:
+        meta = dict(global_metadata)
+        meta.update(normalize_metadata_strings(dict(doc.metadata)))
+        merged_docs.append(Document(page_content=doc.page_content, metadata=meta))
+
+    return merged_docs
+
+
 def _attach_chunk_metadata(docs: list[Document], total_pages: int) -> list[Document]:
     docs.sort(
         key=lambda d: (
@@ -145,13 +156,14 @@ def process_single_file(pdf_file_path: bytes | str, filename: str | None = None)
 
     try:
         has_native_text, page_1_text, total_pages = _detect_pdf_profile(pdf_file_path)
+        ocr_page_docs: list[Document] = []
 
         if not has_native_text:
-            temp_page_docs = run_hybrid_ocr_wsl(pdf_file_path, {})
-            if temp_page_docs:
-                page_1_text = temp_page_docs[0].page_content
+            ocr_page_docs = run_hybrid_ocr(pdf_file_path, {})
+            if ocr_page_docs:
+                page_1_text = ocr_page_docs[0].page_content
 
-        global_metadata = extract_metadata_with_llamacpp(page_1_text)
+        global_metadata = extract_metadata_with_llamacpp(page_1_text, filename)
         _safe_log(f"[ingest] metadata={global_metadata}")
 
         table_docs = extract_tables_to_markdown(pdf_file_path, global_metadata)
@@ -161,7 +173,7 @@ def process_single_file(pdf_file_path: bytes | str, filename: str | None = None)
         text_docs = (
             extract_text_pymupdf(pdf_file_path, global_metadata)
             if has_native_text
-            else run_hybrid_ocr_wsl(pdf_file_path, global_metadata)
+            else (_apply_global_metadata(ocr_page_docs, global_metadata) if ocr_page_docs else run_hybrid_ocr(pdf_file_path, global_metadata))
         )
 
         table_pages = {

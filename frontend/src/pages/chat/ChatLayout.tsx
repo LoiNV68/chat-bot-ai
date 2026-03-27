@@ -166,199 +166,199 @@ const SidebarContent = ({
   }, [isSettingsOpen, setIsSettingsOpen]);
 
   return (
-  <>
-    <div
-      className={cn(
-        "flex h-16 items-center border-b border-slate-800",
-        isCollapsed ? "justify-center px-0" : "px-6 justify-between",
-      )}
-    >
-      {!isCollapsed && (
-        <span className="text-lg font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500 animate-in fade-in duration-300">
-          AI CHAT-BOT
-        </span>
-      )}
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={toggleSidebar}
+    <>
+      <div
         className={cn(
-          "hidden md:flex text-slate-400 hover:text-cyan-400 hover:bg-cyan-500/10",
-          isCollapsed && "mx-auto",
+          "flex h-16 items-center border-b border-slate-800",
+          isCollapsed ? "justify-center px-0" : "px-6 justify-between",
         )}
       >
-        {isCollapsed ? (
-          <PanelLeftOpen className="h-5 w-5" />
-        ) : (
-          <PanelLeftClose className="h-5 w-5" />
+        {!isCollapsed && (
+          <span className="text-lg font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500 animate-in fade-in duration-300">
+            AI CHAT-BOT
+          </span>
         )}
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={() => setIsMobileMenuOpen(false)}
-        className="flex md:hidden text-slate-400 hover:text-red-400"
-      >
-        <X className="h-5 w-5" />
-      </Button>
-    </div>
-
-    <div className="p-4">
-      <Button
-        onClick={handleNewChat}
-        className={cn(
-          "w-full bg-gradient-to-r from-cyan-600/20 to-blue-600/20 border border-cyan-500/30 text-cyan-400 hover:text-cyan-300 hover:border-cyan-400 hover:bg-cyan-500/10 transition-all font-medium",
-          isCollapsed ? "justify-center px-0" : "justify-start gap-2",
-        )}
-        title="Cuộc trò chuyện mới"
-      >
-        <Plus className="h-4 w-4" />
-        {!isCollapsed && <span>CUỘC TRÒ CHUYỆN MỚI</span>}
-      </Button>
-    </div>
-
-    <div className="flex-1 overflow-y-auto px-2 py-2">
-      {!isCollapsed && (
-        <h3 className="mb-2 px-4 text-xs font-semibold uppercase tracking-wider text-slate-500 animate-in fade-in">
-          NHẬT KÝ GẦN ĐÂY
-        </h3>
-      )}
-      <div className="space-y-1">
-        {sessions.map((session) => (
-          <div
-            key={session.id}
-            className={cn(
-              "group flex items-center gap-3 rounded-lg py-3 text-sm transition-all hover:bg-white/5 cursor-pointer relative",
-              currentSessionId === session.id
-                ? "bg-white/10 text-cyan-300"
-                : "text-slate-400",
-              isCollapsed ? "justify-center px-0" : "px-4",
-            )}
-            onClick={() => loadSession(session.id)}
-            title={session.title || "New Chat"}
-          >
-            <MessageSquare className="h-4 w-4 opacity-70 shrink-0" />
-            {!isCollapsed && (
-              <>
-                <span className="truncate flex-1">
-                  {session.title || "New Chat"}
-                </span>
-                {session.is_pinned && (
-                  <Pin className="h-3 w-3 text-cyan-500 shrink-0" />
-                )}
-
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-slate-700 p-0"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <MoreHorizontal className="h-4 w-4" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent
-                    align="end"
-                    className="w-48 bg-slate-900 border-slate-700 text-slate-200"
-                  >
-                    <DropdownMenuItem
-                      onClick={(e) => handleRenameSession(e, session.id)}
-                      className="cursor-pointer hover:bg-slate-800 focus:bg-slate-800"
-                    >
-                      <Pencil className="mr-2 h-4 w-4" /> Đổi tên
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      onClick={(e) => handlePinSession(e, session)}
-                      className="cursor-pointer hover:bg-slate-800 focus:bg-slate-800"
-                    >
-                      {session.is_pinned ? (
-                        <>
-                          <PinOff className="mr-2 h-4 w-4" /> Bỏ ghim
-                        </>
-                      ) : (
-                        <>
-                          <Pin className="mr-2 h-4 w-4" /> Ghim hội thoại
-                        </>
-                      )}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      onClick={(e) => handleDeleteSession(e, session.id)}
-                      className="cursor-pointer text-red-400 hover:text-red-300 hover:bg-red-500/10 focus:bg-red-500/10"
-                    >
-                      <Trash className="mr-2 h-4 w-4" /> Xóa hội thoại
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-
-    <div ref={menuRef} className="border-t border-slate-800 p-4 relative">
-      {isSettingsOpen && !isCollapsed && (
-        <div className="absolute bottom-full left-4 right-4 mb-2 rounded-xl border border-slate-700 bg-slate-900/95 backdrop-blur-xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200 z-50">
-          <button
-            onClick={() => setIsProfileOpen(true)}
-            className="flex w-full items-center gap-3 px-4 py-3 text-sm text-slate-200 hover:bg-slate-800 transition-colors border-b border-slate-800/50"
-          >
-            <User className="h-4 w-4 text-slate-400" />
-            <span>Thông tin cá nhân</span>
-          </button>
-          {/* Document Management: Admin or Lecturer */}
-          {(user?.is_superuser ||
-            user?.role === "lecturer" ||
-            user?.role === "admin") && (
-            <button
-              onClick={() => navigate("/admin")}
-              className="flex w-full items-center gap-3 px-4 py-3 text-sm text-cyan-400 hover:bg-cyan-500/10 transition-colors border-b border-slate-800/50"
-            >
-              <Shield className="h-4 w-4" />
-              <span>Quản lý tài liệu</span>
-            </button>
-          )}
-          {/* User Management: Admin only */}
-          {user?.is_superuser && (
-            <button
-              onClick={() => navigate("/admin/users")}
-              className="flex w-full items-center gap-3 px-4 py-3 text-sm text-purple-400 hover:bg-purple-500/10 transition-colors border-b border-slate-800/50"
-            >
-              <Shield className="h-4 w-4" />
-              <span>Quản lý người dùng</span>
-            </button>
-          )}
-          <button
-            onClick={logout}
-            className="flex w-full items-center gap-3 px-4 py-3 text-sm text-red-400 hover:bg-red-500/10 transition-colors"
-          >
-            <LogOut className="h-4 w-4" />
-            <span>Đăng xuất</span>
-          </button>
-        </div>
-      )}
-
-      <button
-        onClick={() => !isCollapsed && setIsSettingsOpen(!isSettingsOpen)}
-        className={cn(
-          "flex w-full items-center gap-3 rounded-lg py-3 text-sm font-medium transition-all duration-200",
-          isSettingsOpen && !isCollapsed
-            ? "bg-cyan-500/10 text-cyan-400 shadow-[0_0_15px_-5px_rgba(6,182,212,0.5)]"
-            : "text-slate-400 hover:bg-white/5 hover:text-slate-200",
-          isCollapsed ? "justify-center px-0" : "px-4",
-        )}
-      >
-        <Settings
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={toggleSidebar}
           className={cn(
-            "h-4 w-4 transition-transform duration-500",
-            isSettingsOpen && !isCollapsed && "rotate-180",
+            "hidden md:flex text-slate-400 hover:text-cyan-400 hover:bg-cyan-500/10",
+            isCollapsed && "mx-auto",
           )}
-        />
-        {!isCollapsed && <span>Cài đặt & Tài khoản</span>}
-      </button>
-    </div>
-  </>
+        >
+          {isCollapsed ? (
+            <PanelLeftOpen className="h-5 w-5" />
+          ) : (
+            <PanelLeftClose className="h-5 w-5" />
+          )}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => setIsMobileMenuOpen(false)}
+          className="flex md:hidden text-slate-400 hover:text-red-400"
+        >
+          <X className="h-5 w-5" />
+        </Button>
+      </div>
+
+      <div className="p-4">
+        <Button
+          onClick={handleNewChat}
+          className={cn(
+            "w-full bg-gradient-to-r from-cyan-600/20 to-blue-600/20 border border-cyan-500/30 text-cyan-400 hover:text-cyan-300 hover:border-cyan-400 hover:bg-cyan-500/10 transition-all font-medium",
+            isCollapsed ? "justify-center px-0" : "justify-start gap-2",
+          )}
+          title="Cuộc trò chuyện mới"
+        >
+          <Plus className="h-4 w-4" />
+          {!isCollapsed && <span>CUỘC TRÒ CHUYỆN MỚI</span>}
+        </Button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-2 py-2">
+        {!isCollapsed && (
+          <h3 className="mb-2 px-4 text-xs font-semibold uppercase tracking-wider text-slate-500 animate-in fade-in">
+            NHẬT KÝ GẦN ĐÂY
+          </h3>
+        )}
+        <div className="space-y-1">
+          {sessions.map((session) => (
+            <div
+              key={session.id}
+              className={cn(
+                "group flex items-center gap-3 rounded-lg py-3 text-sm transition-all hover:bg-white/5 cursor-pointer relative",
+                currentSessionId === session.id
+                  ? "bg-white/10 text-cyan-300"
+                  : "text-slate-400",
+                isCollapsed ? "justify-center px-0" : "px-4",
+              )}
+              onClick={() => loadSession(session.id)}
+              title={session.title || "New Chat"}
+            >
+              <MessageSquare className="h-4 w-4 opacity-70 shrink-0" />
+              {!isCollapsed && (
+                <>
+                  <span className="truncate flex-1">
+                    {session.title || "New Chat"}
+                  </span>
+                  {session.is_pinned && (
+                    <Pin className="h-3 w-3 text-cyan-500 shrink-0" />
+                  )}
+
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-slate-700 p-0"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <MoreHorizontal className="h-4 w-4" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      align="end"
+                      className="w-48 bg-slate-900 border-slate-700 text-slate-200"
+                    >
+                      <DropdownMenuItem
+                        onClick={(e) => handleRenameSession(e, session.id)}
+                        className="cursor-pointer hover:bg-slate-800 focus:bg-slate-800"
+                      >
+                        <Pencil className="mr-2 h-4 w-4" /> Đổi tên
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={(e) => handlePinSession(e, session)}
+                        className="cursor-pointer hover:bg-slate-800 focus:bg-slate-800"
+                      >
+                        {session.is_pinned ? (
+                          <>
+                            <PinOff className="mr-2 h-4 w-4" /> Bỏ ghim
+                          </>
+                        ) : (
+                          <>
+                            <Pin className="mr-2 h-4 w-4" /> Ghim hội thoại
+                          </>
+                        )}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={(e) => handleDeleteSession(e, session.id)}
+                        className="cursor-pointer text-red-400 hover:text-red-300 hover:bg-red-500/10 focus:bg-red-500/10"
+                      >
+                        <Trash className="mr-2 h-4 w-4" /> Xóa hội thoại
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div ref={menuRef} className="border-t border-slate-800 p-4 relative">
+        {isSettingsOpen && !isCollapsed && (
+          <div className="absolute bottom-full left-4 right-4 mb-2 rounded-xl border border-slate-700 bg-slate-900/95 backdrop-blur-xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200 z-50">
+            <button
+              onClick={() => setIsProfileOpen(true)}
+              className="flex w-full items-center gap-3 px-4 py-3 text-sm text-slate-200 hover:bg-slate-800 transition-colors border-b border-slate-800/50"
+            >
+              <User className="h-4 w-4 text-slate-400" />
+              <span>Thông tin cá nhân</span>
+            </button>
+            {/* Document Management: Admin or Lecturer */}
+            {(user?.is_superuser ||
+              user?.role === "lecturer" ||
+              user?.role === "admin") && (
+                <button
+                  onClick={() => navigate("/admin")}
+                  className="flex w-full items-center gap-3 px-4 py-3 text-sm text-cyan-400 hover:bg-cyan-500/10 transition-colors border-b border-slate-800/50"
+                >
+                  <Shield className="h-4 w-4" />
+                  <span>Quản lý tài liệu</span>
+                </button>
+              )}
+            {/* User Management: Admin only */}
+            {user?.is_superuser && (
+              <button
+                onClick={() => navigate("/admin/users")}
+                className="flex w-full items-center gap-3 px-4 py-3 text-sm text-purple-400 hover:bg-purple-500/10 transition-colors border-b border-slate-800/50"
+              >
+                <Shield className="h-4 w-4" />
+                <span>Quản lý người dùng</span>
+              </button>
+            )}
+            <button
+              onClick={logout}
+              className="flex w-full items-center gap-3 px-4 py-3 text-sm text-red-400 hover:bg-red-500/10 transition-colors"
+            >
+              <LogOut className="h-4 w-4" />
+              <span>Đăng xuất</span>
+            </button>
+          </div>
+        )}
+
+        <button
+          onClick={() => !isCollapsed && setIsSettingsOpen(!isSettingsOpen)}
+          className={cn(
+            "flex w-full items-center gap-3 rounded-lg py-3 text-sm font-medium transition-all duration-200",
+            isSettingsOpen && !isCollapsed
+              ? "bg-cyan-500/10 text-cyan-400 shadow-[0_0_15px_-5px_rgba(6,182,212,0.5)]"
+              : "text-slate-400 hover:bg-white/5 hover:text-slate-200",
+            isCollapsed ? "justify-center px-0" : "px-4",
+          )}
+        >
+          <Settings
+            className={cn(
+              "h-4 w-4 transition-transform duration-500",
+              isSettingsOpen && !isCollapsed && "rotate-180",
+            )}
+          />
+          {!isCollapsed && <span>Cài đặt & Tài khoản</span>}
+        </button>
+      </div>
+    </>
   );
 };
 
@@ -419,7 +419,7 @@ const ChatLayout = () => {
     try {
       chatContextRef.current += 1;
       setIsTyping(false);
-      
+
       setCurrentSessionId(sessionId);
       const token = localStorage.getItem("token");
       const response = await axios.get(API_ENDPOINTS.CHAT.MESSAGES(sessionId), {
@@ -732,7 +732,7 @@ const ChatLayout = () => {
                     "prose-code:bg-slate-900/50 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:text-cyan-200"
                   )}
                 >
-                  <ReactMarkdown 
+                  <ReactMarkdown
                     remarkPlugins={[remarkGfm, remarkBreaks]}
                     components={{
                       p: ({ node, ...props }) => (
@@ -850,7 +850,7 @@ const ChatLayout = () => {
               </Button>
             </div>
             <div className="mt-2 text-center text-xs text-slate-600">
-              AI-ChatBot v2.0 | Hệ thống sẵn sàng
+              AI-ChatBot | Hệ thống sẵn sàng
             </div>
           </div>
         </div>

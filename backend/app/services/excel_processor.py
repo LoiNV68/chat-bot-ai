@@ -2,11 +2,18 @@ import os
 import pandas as pd
 from langchain_core.documents import Document
 
+
+def _safe_log(message: str) -> None:
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        print(message.encode("ascii", "replace").decode("ascii"))
+
 # =====================================================================
 # MODULE: XỬ LÝ EXCEL BATCHING TÌM KIẾM
 # =====================================================================
 def process_excel_file(excel_path: str, global_metadata: dict) -> list[Document]:
-    print(f"📊 Đang xử lý file Excel: {os.path.basename(excel_path)}...")
+    _safe_log(f"[excel] processing file: {os.path.basename(excel_path)}")
     excel_docs = []
     
     # Số dòng sinh viên gom vào 1 chunk
@@ -99,7 +106,7 @@ def process_excel_file(excel_path: str, global_metadata: dict) -> list[Document]
                 excel_docs.append(Document(page_content=final_content, metadata=meta))
                 
     except Exception as e:
-        print(f"❌ Lỗi khi đọc file Excel: {e}")
+        _safe_log(f"[excel] failed to read file: {e}")
         
-    print(f"✅ Đã chia file Excel thành {len(excel_docs)} chunks chuẩn xác.")
+    _safe_log(f"[excel] completed chunks={len(excel_docs)}")
     return excel_docs

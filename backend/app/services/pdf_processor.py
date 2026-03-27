@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import gc
 import json
@@ -6,7 +6,7 @@ import os
 import pathlib
 import re
 import subprocess
-import tempfile
+import sys
 import uuid
 from datetime import datetime
 from typing import Any
@@ -18,6 +18,7 @@ from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
+from app.core.config import settings
 from app.services.text_normalization import (
     apply_common_ocr_fixes,
     clean_ocr_text,
@@ -40,6 +41,7 @@ DEFAULT_METADATA: dict[str, Any] = {
 
 ROWS_PER_TABLE_CHUNK = 20
 TABLE_MAX_CHARS = 1200
+SCAN_RENDER_DPI = 300
 
 
 def _safe_log(message: str) -> None:
@@ -49,6 +51,16 @@ def _safe_log(message: str) -> None:
         print(message.encode("ascii", "replace").decode("ascii"))
 
 
+def _safe_unlink(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
 def _sanitize_date(value: Any) -> str | None:
     if value is None:
         return None
@@ -56,8 +68,21 @@ def _sanitize_date(value: Any) -> str | None:
     if not text:
         return None
     lowered = text.lower()
+    folded = fold_text_for_search(text)
     if lowered in {"không xác định", "khong xac dinh", "none", "null"}:
         return None
+
+    m2 = re.search(
+        r"ngay\s*(\d{1,2})\s*thang\s*(\d{1,2})\s*nam\s*(20\d{2})",
+        folded,
+        flags=re.IGNORECASE,
+    )
+    if m2:
+        day, month, year = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
+        try:
+            return datetime(year, month, day).strftime("%Y-%m-%d")
+        except ValueError:
+            return None
 
     date_patterns = [
         r"\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b",
@@ -75,18 +100,6 @@ def _sanitize_date(value: Any) -> str | None:
             return datetime(year, month, day).strftime("%Y-%m-%d")
         except ValueError:
             continue
-
-    m2 = re.search(
-        r"ngày\s*(\d{1,2})\s*tháng\s*(\d{1,2})\s*năm\s*(20\d{2})",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if m2:
-        day, month, year = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
-        try:
-            return datetime(year, month, day).strftime("%Y-%m-%d")
-        except ValueError:
-            return None
 
     return None
 
@@ -149,6 +162,63 @@ def _extract_metadata_from_text(page_text: str) -> dict[str, Any]:
     return data
 
 
+def _extract_metadata_from_filename(filename: str | None) -> dict[str, Any]:
+    if not filename:
+        return dict(DEFAULT_METADATA)
+
+    stem = normalize_unicode(pathlib.Path(filename).stem)
+    stem = re.sub(r"[_\-]+", " ", stem)
+    stem = re.sub(r"\s+", " ", stem).strip()
+    stem = re.sub(r"^\d{8,14}\s+", "", stem)
+    stem = re.sub(r"(?:[_\-\s]0{0,3}\d{1,4})$", "", stem).strip(" ._-")
+    if not stem:
+        return dict(DEFAULT_METADATA)
+
+    data = _extract_metadata_from_text(stem)
+    folded = fold_text_for_search(stem)
+
+    doc_type_aliases = [
+        ("Quyết_định", ["quyet dinh", "qd"]),
+        ("Thông_báo", ["thong bao", "tb"]),
+        ("Công_văn", ["cong van", "cv"]),
+        ("Danh_sách", ["danh sach"]),
+        ("Kế_hoạch", ["ke hoach"]),
+        ("Báo_cáo", ["bao cao"]),
+    ]
+    for doc_type, aliases in doc_type_aliases:
+        if any(alias in folded for alias in aliases):
+            data["doc_type"] = doc_type
+            break
+
+    number_patterns = [
+        r"(?:QĐ|QD|Quyết\s*định)\s*(?:số|so)?\s*[:.]?\s*([0-9A-Za-z/\-\.]+)",
+        r"(?:Số|So)\s*[:.]?\s*([0-9A-Za-z/\-\.]+)",
+    ]
+    for pattern in number_patterns:
+        m = re.search(pattern, stem, flags=re.IGNORECASE)
+        if not m:
+            continue
+        candidate = normalize_whitespace(m.group(1)).strip(".,;:")
+        if candidate:
+            data["doc_number"] = candidate
+            break
+
+    title = stem
+    title = re.sub(
+        r"^(?:QĐ|QD|QUYẾT\s*ĐỊNH|THÔNG\s*BÁO|TB|CÔNG\s*VĂN|CV)\s*",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(r"^(?:Số|So)\s*[:.]?\s*[0-9A-Za-z/\-\.]+\s*", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"^(?:V\/?\s*v|VV)\s*", "", title, flags=re.IGNORECASE)
+    title = title.strip(" ._-")
+    if title:
+        data["title"] = normalize_whitespace(title)
+
+    return data
+
+
 def _merge_metadata(primary: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
     merged = dict(DEFAULT_METADATA)
     merged.update(fallback or {})
@@ -158,7 +228,13 @@ def _merge_metadata(primary: dict[str, Any], fallback: dict[str, Any]) -> dict[s
             continue
         if isinstance(value, str):
             cleaned = normalize_whitespace(normalize_unicode(value))
-            if cleaned and cleaned.lower() not in {"không xác định", "khong xac dinh", "null"}:
+            default_value = DEFAULT_METADATA.get(key)
+            default_cleaned = (
+                normalize_whitespace(normalize_unicode(default_value))
+                if isinstance(default_value, str)
+                else default_value
+            )
+            if cleaned and cleaned.lower() not in {"không xác định", "khong xac dinh", "null"} and cleaned != default_cleaned:
                 merged[key] = cleaned
         else:
             merged[key] = value
@@ -166,20 +242,24 @@ def _merge_metadata(primary: dict[str, Any], fallback: dict[str, Any]) -> dict[s
     merged["date"] = _sanitize_date(primary.get("date") if primary else None) or _sanitize_date(
         fallback.get("date") if fallback else None
     )
+    merged.setdefault("section", "khac")
+    merged.setdefault("topic", "khac")
     return normalize_metadata_strings(merged)
 
 
-def extract_metadata_with_llamacpp(page_1_text: str) -> dict:
+def extract_metadata_with_llamacpp(page_1_text: str, filename_hint: str | None = None) -> dict:
     _safe_log("[ingest] extracting metadata")
 
-    base_fallback = _extract_metadata_from_text(page_1_text)
+    text_fallback = _extract_metadata_from_text(page_1_text)
+    filename_fallback = _extract_metadata_from_filename(filename_hint)
+    base_fallback = _merge_metadata(text_fallback, filename_fallback)
     if not page_1_text or not page_1_text.strip():
         return _merge_metadata({}, base_fallback)
 
     llm = ChatOpenAI(
-        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:8080/v1"),
+        base_url=settings.OLLAMA_BASE_URL,
         api_key="sk-no-key-required",
-        model=os.getenv("LLM_MODEL", "qwen2.5:7b"),
+        model=settings.LLM_MODEL,
         temperature=0,
         model_kwargs={"response_format": {"type": "json_object"}},
     )
@@ -200,14 +280,21 @@ Không thêm giải thích ngoài JSON.
 
     messages = [
         SystemMessage(content=system_prompt),
-        HumanMessage(content=f"Văn bản:\n{page_1_text[:3000]}"),
+        HumanMessage(
+            content=(
+                f"Tên file: {filename_hint or 'Không xác định'}\n\n"
+                f"Văn bản:\n{page_1_text[:3000]}"
+            )
+        ),
     ]
 
     try:
         response = llm.invoke(messages)
         payload = json.loads(response.content)
     except Exception as exc:
-        _safe_log(f"[ingest] metadata llm failed: {exc}")
+        _safe_log(
+            f"[ingest] metadata llm failed base_url={settings.OLLAMA_BASE_URL} model={settings.LLM_MODEL}: {exc}"
+        )
         payload = {}
 
     return _merge_metadata(payload, base_fallback)
@@ -348,11 +435,7 @@ def extract_tables_to_markdown(pdf_path: str, global_metadata: dict) -> list[Doc
     return table_docs
 
 
-def to_wsl_path(win_path: str) -> str:
-    p = pathlib.Path(win_path).resolve()
-    drive = p.drive.replace(":", "").lower()
-    parts = list(p.parts[1:])
-    return f"/mnt/{drive}/" + "/".join(parts)
+
 
 
 def html_table_to_markdown(html_str: str) -> str:
@@ -375,37 +458,27 @@ def html_table_to_markdown(html_str: str) -> str:
 
 def extract_tables_from_scan(pdf_path: str, global_metadata: dict) -> list[Document]:
     _safe_log("[ingest] extracting tables from scan via ppstructure")
+    from app.services.ppstructure_service import process_table
+
     table_docs: list[Document] = []
     session_id = uuid.uuid4().hex
+    doc = None
 
     try:
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
-        matrix = fitz.Matrix(200 / 72, 200 / 72)
-        wsl_cwd = to_wsl_path(os.getcwd())
-
+        matrix = fitz.Matrix(SCAN_RENDER_DPI / 72, SCAN_RENDER_DPI / 72)
+        temp_root = os.path.join(os.getcwd(), "temp")
+        os.makedirs(temp_root, exist_ok=True)
         for page_num in range(total_pages):
             page = doc[page_num]
-            pix = page.get_pixmap(matrix=matrix)
-
-            temp_img_path = os.path.join("temp", f"img_{session_id}_p{page_num}.jpg")
-            temp_json_path = os.path.join("temp", f"res_{session_id}_p{page_num}.json")
-            os.makedirs("temp", exist_ok=True)
-            pix.save(temp_img_path)
-
-            img_rel_path = temp_img_path.replace("\\", "/")
-            json_rel_path = temp_json_path.replace("\\", "/")
-            wsl_img_path = f"{wsl_cwd}/{img_rel_path}"
-            wsl_json_path = f"{wsl_cwd}/{json_rel_path}"
-            command = (
-                f"wsl -d Ubuntu --cd {wsl_cwd} -e python3 "
-                f"app/services/ppstructure_service.py {wsl_img_path} {wsl_json_path}"
-            )
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
+            temp_img_path = os.path.join(temp_root, f"img_{session_id}_p{page_num}.jpg")
+            temp_json_path = os.path.join(temp_root, f"res_{session_id}_p{page_num}.json")
 
             try:
-                run_result = subprocess.run(command, shell=True, capture_output=True)
-                if run_result.returncode != 0:
-                    raise RuntimeError(f"ppstructure failed on page {page_num + 1}")
+                pix.save(temp_img_path)
+                process_table(temp_img_path, temp_json_path)
 
                 if not os.path.exists(temp_json_path):
                     continue
@@ -449,16 +522,15 @@ def extract_tables_from_scan(pdf_path: str, global_metadata: dict) -> list[Docum
             except Exception as exc:
                 _safe_log(f"[ingest] table scan failed page={page_num + 1}: {exc}")
             finally:
-                if os.path.exists(temp_img_path):
-                    os.remove(temp_img_path)
-                if os.path.exists(temp_json_path):
-                    os.remove(temp_json_path)
+                _safe_unlink(temp_img_path)
+                _safe_unlink(temp_json_path)
 
             gc.collect()
-
-        doc.close()
     except Exception as exc:
         _safe_log(f"[ingest] scan table extraction failed: {exc}")
+    finally:
+        if doc is not None:
+            doc.close()
 
     _safe_log(f"[ingest] scan table chunks={len(table_docs)}")
     return table_docs
@@ -480,61 +552,70 @@ def _extract_json_array(stdout: str) -> list[dict[str, Any]]:
     return []
 
 
-def run_hybrid_ocr_wsl(pdf_path: str, global_metadata: dict) -> list[Document]:
+def run_hybrid_ocr(pdf_path: str, global_metadata: dict) -> list[Document]:
     _safe_log("[ingest] running hybrid ocr")
     docs: list[Document] = []
+    doc = None
+    image_paths: list[str] = []
 
     try:
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
-        matrix = fitz.Matrix(200 / 72, 200 / 72)
+        matrix = fitz.Matrix(SCAN_RENDER_DPI / 72, SCAN_RENDER_DPI / 72)
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            image_paths: list[str] = []
-            for page_num in range(total_pages):
-                page = doc[page_num]
-                image_path = os.path.join(tmp_dir, f"page_{page_num}.png")
-                page.get_pixmap(matrix=matrix).save(image_path)
-                image_paths.append(image_path)
+        temp_root = os.path.join(os.getcwd(), "temp")
+        os.makedirs(temp_root, exist_ok=True)
+        session_id = uuid.uuid4().hex
+        for page_num in range(total_pages):
+            page = doc[page_num]
+            image_path = os.path.join(temp_root, f"page_{session_id}_{page_num}.png")
+            page.get_pixmap(matrix=matrix, alpha=False).save(image_path)
+            image_paths.append(image_path)
 
-            doc.close()
+        doc.close()
+        doc = None
 
-            script_path = os.path.join(os.getcwd(), "app", "services", "hybrid_ocr_service.py")
-            cmd = [
-                "wsl",
-                "-d",
-                "Ubuntu",
-                "--",
-                "python3",
-                to_wsl_path(script_path),
-                *[to_wsl_path(path) for path in image_paths],
-            ]
-            process = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
-            if process.returncode != 0:
-                _safe_log(f"[ingest] hybrid ocr failed: {process.stderr.strip()[:200]}")
-                return []
+        # Chạy OCR trong subprocess riêng để tránh xung đột DLL PaddlePaddle/PyTorch
+        script_path = os.path.join(os.path.dirname(__file__), "hybrid_ocr_service.py")
+        python_exe = sys.executable
+        cmd = [python_exe, script_path, *image_paths]
+        process = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if process.returncode != 0:
+            _safe_log(f"[ingest] hybrid ocr failed: {process.stderr.strip()[:200]}")
+            return []
 
-            page_results = _extract_json_array(process.stdout)
-            for idx, item in enumerate(page_results):
-                raw_text = str(item.get("text", ""))
-                cleaned_text = clean_ocr_text(raw_text)
-                if not cleaned_text:
-                    continue
+        page_results = _extract_json_array(process.stdout)
+        for idx, item in enumerate(page_results):
+            raw_text = str(item.get("text", ""))
+            cleaned_text = clean_ocr_text(raw_text)
+            if not cleaned_text:
+                continue
 
-                meta = dict(global_metadata)
-                meta.update(
-                    {
-                        "source": os.path.basename(pdf_path),
-                        "page": idx + 1,
-                        "content_type": "text",
-                        "chunk_type": "text",
-                        "ocr_engine": "hybrid_ocr",
-                    }
-                )
-                docs.append(Document(page_content=cleaned_text, metadata=normalize_metadata_strings(meta)))
+            meta = dict(global_metadata)
+            meta.update(
+                {
+                    "source": os.path.basename(pdf_path),
+                    "page": idx + 1,
+                    "content_type": "text",
+                    "chunk_type": "text",
+                    "ocr_engine": "hybrid_ocr",
+                }
+            )
+            docs.append(Document(page_content=cleaned_text, metadata=normalize_metadata_strings(meta)))
 
     except Exception as exc:
         _safe_log(f"[ingest] hybrid ocr exception: {exc}")
+    finally:
+        if doc is not None:
+            doc.close()
+        for image_path in image_paths:
+            _safe_unlink(image_path)
 
     return docs
 
